@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pave Settings</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <main class="container">
+      <h1>Pave</h1>
+      <p class="subtitle">Window Tiling</p>
+
+      <section class="setting-group">
+        <label for="gap-slider">
+          Gap Size: <span id="gap-value">15</span>px
+        </label>
+        <input type="range" id="gap-slider" min="0" max="30" value="15" />
+      </section>
+
+      <section class="setting-group">
+        <label for="corner-slider">
+          Corner Radius: <span id="corner-value">0</span>px
+        </label>
+        <input type="range" id="corner-slider" min="0" max="20" value="0" />
+        <p class="setting-hint">Controls window corner rounding via ShapeCorners</p>
+      </section>
+
+      <section class="setting-group">
+        <label>Monitors</label>
+        <div id="monitors-list" class="monitors-list">
+          <p class="loading">Loading monitors...</p>
+        </div>
+      </section>
+
+      <section class="setting-group">
+        <label>Shortcuts</label>
+        <div class="shortcuts-list">
+          <div class="shortcut-row">
+            <span class="shortcut-label">Almost Maximize</span>
+            <kbd>Ctrl + Alt + Enter</kbd>
+          </div>
+          <div class="shortcut-row">
+            <span class="shortcut-label">Snap Left</span>
+            <kbd>Ctrl + Alt + Left</kbd>
+          </div>
+          <div class="shortcut-row">
+            <span class="shortcut-label">Snap Right</span>
+            <kbd>Ctrl + Alt + Right</kbd>
+          </div>
+        </div>
+      </section>
+
+      <section class="setting-group">
+        <label class="toggle-row">
+          <span>Start on login</span>
+          <input type="checkbox" id="autostart-toggle" />
+          <span class="toggle-slider"></span>
+        </label>
+      </section>
+
+      <div class="actions">
+        <button id="save-btn" type="button">Save</button>
+      </div>
+
+      <div id="status-msg" class="status-msg"></div>
+    </main>
+  </body>
+</html>

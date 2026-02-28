@@ -1,0 +1,235 @@
+mod config;
+mod platform;
+mod tiling;
+mod tray;
+
+use config::PaveConfig;
+use platform::kwin::KWinBackend;
+use platform::MonitorInfo;
+use std::sync::Arc;
+use tauri::Manager;
+use tokio::sync::RwLock;
+
+struct AppState {
+    config: Arc<RwLock<PaveConfig>>,
+    tiling_state: Arc<tiling::TilingState>,
+    backend: Arc<KWinBackend>,
+}
+
+#[tauri::command]
+async fn get_config(state: tauri::State<'_, AppState>) -> Result<PaveConfig, String> {
+    Ok(state.config.read().await.clone())
+}
+
+#[tauri::command]
+async fn update_config(
+    state: tauri::State<'_, AppState>,
+    config: PaveConfig,
+) -> Result<(), String> {
+    config.save()?;
+    if let Some(r) = config.corner_radius {
+        KWinBackend::ensure_shapecorners_defaults().map_err(|e| {
+            log::error!("Failed to set ShapeCorners defaults: {e}");
+            e
+        })?;
+        if let Err(e) = state.backend.apply_corner_radius(r).await {
+            log::error!("Failed to apply corner radius: {e}");
+        }
+    }
+    *state.config.write().await = config;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_monitors(state: tauri::State<'_, AppState>) -> Result<Vec<MonitorInfo>, String> {
+    state.backend.get_monitors().await
+}
+
+#[tauri::command]
+async fn is_first_run() -> Result<bool, String> {
+    Ok(PaveConfig::is_first_run())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    // Work around WebKit Wayland protocol error when creating windows
+    // by disabling the DMABuf renderer that triggers the crash
+    unsafe {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
+    env_logger::init();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![]),
+        ))
+        .invoke_handler(tauri::generate_handler![
+            get_config,
+            update_config,
+            get_monitors,
+            is_first_run
+        ])
+        .setup(|app| {
+            let handle = app.handle().clone();
+
+            // Setup tray icon
+            tray::setup_tray(&handle)?;
+
+            // Initialize backend and state in async context
+            let handle2 = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let (backend, mut shortcut_rx, mut resize_rx) = match KWinBackend::new().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::error!("Failed to initialize KWin backend: {e}");
+                        return;
+                    }
+                };
+
+                let config = PaveConfig::load();
+                let first_run = PaveConfig::is_first_run();
+
+                // Save default config on first run
+                if first_run {
+                    if let Err(e) = config.save() {
+                        log::warn!("Failed to save default config: {e}");
+                    }
+                }
+
+                // Register global shortcuts via KWin script
+                if let Err(e) = backend.register_all_shortcuts().await {
+                    log::error!("Failed to register shortcuts: {e}");
+                }
+
+                // Apply corner radius on startup if configured
+                if let Some(r) = config.corner_radius {
+                    if let Err(e) = KWinBackend::ensure_shapecorners_defaults() {
+                        log::error!("Failed to set ShapeCorners defaults: {e}");
+                    }
+                    if let Err(e) = backend.apply_corner_radius(r).await {
+                        log::error!("Failed to apply corner radius on startup: {e}");
+                    }
+                }
+
+                let backend_arc = Arc::new(backend);
+                let config_arc = Arc::new(RwLock::new(config));
+                let tiling_state_arc = Arc::new(tiling::TilingState::new());
+
+                let state = AppState {
+                    config: config_arc.clone(),
+                    tiling_state: tiling_state_arc.clone(),
+                    backend: backend_arc.clone(),
+                };
+
+                handle2.manage(state);
+
+                // Show settings window on first run
+                if first_run {
+                    if let Err(e) = tauri::WebviewWindowBuilder::new(
+                        &handle2,
+                        "settings",
+                        tauri::WebviewUrl::App("index.html".into()),
+                    )
+                    .title("Pave Settings")
+                    .inner_size(480.0, 400.0)
+                    .resizable(false)
+                    .center()
+                    .build()
+                    {
+                        log::warn!("Failed to show first-run settings: {e}");
+                    }
+                }
+
+                // Listen for shortcut presses and resize events via D-Bus callbacks
+                loop {
+                    tokio::select! {
+                        result = shortcut_rx.recv() => {
+                            match result {
+                                Ok(action) => {
+                                    log::info!("Processing shortcut: {action}");
+                                    let cfg = config_arc.read().await.clone();
+                                    let wm = backend_arc.clone();
+                                    let ts = tiling_state_arc.clone();
+
+                                    let result = match action.as_str() {
+                                        "pave_maximize" => {
+                                            tiling::handle_maximize(wm.as_ref(), &cfg, &ts).await
+                                        }
+                                        "pave_snap_left" => {
+                                            tiling::handle_snap(
+                                                wm.as_ref(),
+                                                &cfg,
+                                                &ts,
+                                                tiling::SnapSide::Left,
+                                            )
+                                            .await
+                                        }
+                                        "pave_snap_right" => {
+                                            tiling::handle_snap(
+                                                wm.as_ref(),
+                                                &cfg,
+                                                &ts,
+                                                tiling::SnapSide::Right,
+                                            )
+                                            .await
+                                        }
+                                        _ => {
+                                            log::debug!("Unknown shortcut action: {action}");
+                                            Ok(())
+                                        }
+                                    };
+
+                                    if let Err(e) = result {
+                                        log::error!("Tiling action '{action}' failed: {e}");
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("Shortcut receiver error: {e}");
+                                    break;
+                                }
+                            }
+                        }
+                        result = resize_rx.recv() => {
+                            match result {
+                                Ok(payload) => {
+                                    log::info!("Processing resize event");
+                                    match serde_json::from_str::<tiling::ResizeEvent>(&payload) {
+                                        Ok(event) => {
+                                            let cfg = config_arc.read().await.clone();
+                                            if let Err(e) = tiling::handle_resize_event(
+                                                backend_arc.as_ref(),
+                                                &cfg,
+                                                &event,
+                                            ).await {
+                                                log::error!("Resize event handling failed: {e}");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::error!("Failed to parse resize event: {e}");
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("Resize receiver error: {e}");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            // Keep the app running when all windows are closed (tray-only app)
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                api.prevent_exit();
+            }
+        });
+}

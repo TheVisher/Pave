@@ -1,0 +1,222 @@
+:root {
+  --bg: #1e1e2e;
+  --surface: #282840;
+  --text: #cdd6f4;
+  --text-dim: #7f849c;
+  --accent: #89b4fa;
+  --accent-hover: #74a8fc;
+  --success: #a6e3a1;
+  --error: #f38ba8;
+  --border: #45475a;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.container {
+  padding: 24px;
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+h1 {
+  font-size: 22px;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.subtitle {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin-bottom: 24px;
+}
+
+.setting-group {
+  margin-bottom: 20px;
+}
+
+.setting-group > label {
+  display: block;
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 8px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Slider */
+input[type="range"] {
+  width: 100%;
+  height: 6px;
+  appearance: none;
+  background: var(--border);
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+#gap-value,
+#corner-value {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.setting-hint {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+/* Monitors list */
+.monitors-list {
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 4px 0;
+}
+
+.monitor-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.monitor-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.monitor-row input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+}
+
+.loading {
+  color: var(--text-dim);
+  padding: 12px 14px;
+  font-size: 13px;
+}
+
+/* Shortcuts */
+.shortcuts-list {
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 4px 0;
+}
+
+.shortcut-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+}
+
+.shortcut-label {
+  font-size: 13px;
+}
+
+kbd {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* Toggle */
+.toggle-row {
+  display: flex !important;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 12px 14px;
+  cursor: pointer;
+}
+
+.toggle-row span:first-child {
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.toggle-row input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 18px;
+  height: 18px;
+}
+
+.toggle-slider {
+  display: none;
+}
+
+/* Actions */
+.actions {
+  margin-top: 24px;
+}
+
+#save-btn {
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+#save-btn:hover {
+  background: var(--accent-hover);
+}
+
+#save-btn:active {
+  transform: scale(0.98);
+}
+
+/* Status */
+.status-msg {
+  text-align: center;
+  font-size: 13px;
+  margin-top: 12px;
+  min-height: 20px;
+  transition: opacity 0.2s;
+}
+
+.status-msg.success {
+  color: var(--success);
+}
+
+.status-msg.error {
+  color: var(--error);
+}
