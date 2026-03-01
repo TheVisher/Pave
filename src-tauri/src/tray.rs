@@ -4,6 +4,9 @@ use tauri::{
     AppHandle, Manager, WebviewWindowBuilder,
 };
 use tauri::WebviewUrl;
+use tokio::sync::broadcast;
+
+use crate::config::PaveConfig;
 
 fn show_settings(app: &AppHandle) {
     // If window already exists, just focus it
@@ -15,7 +18,7 @@ fn show_settings(app: &AppHandle) {
     // Create a new settings window on demand (avoids Wayland hide/show crash)
     match WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .title("Pave Settings")
-        .inner_size(480.0, 400.0)
+        .inner_size(480.0, 560.0)
         .resizable(false)
         .center()
         .build()
@@ -25,7 +28,11 @@ fn show_settings(app: &AppHandle) {
     }
 }
 
-pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+pub fn setup_tray(
+    app: &AppHandle,
+    config: &PaveConfig,
+    preset_tx: broadcast::Sender<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let settings_item = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
     let separator1 = PredefinedMenuItem::separator(app)?;
 
@@ -41,17 +48,30 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .build(app)?;
 
     let separator2 = PredefinedMenuItem::separator(app)?;
-    let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
 
-    let menu = MenuBuilder::new(app)
+    let mut menu_builder = MenuBuilder::new(app)
         .item(&settings_item)
         .item(&separator1)
         .item(&maximize_label)
         .item(&left_label)
         .item(&right_label)
-        .item(&separator2)
-        .item(&quit_item)
-        .build()?;
+        .item(&separator2);
+
+    // Add preset items
+    let preset_names: Vec<String> = config.presets.iter().map(|p| p.name.clone()).collect();
+    for name in &preset_names {
+        let item_id = format!("preset_{}", name);
+        let preset_item = MenuItemBuilder::with_id(&item_id, name).build(app)?;
+        menu_builder = menu_builder.item(&preset_item);
+    }
+
+    if !preset_names.is_empty() {
+        let separator3 = PredefinedMenuItem::separator(app)?;
+        menu_builder = menu_builder.item(&separator3);
+    }
+
+    let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+    let menu = menu_builder.item(&quit_item).build()?;
 
     let icon = app
         .default_window_icon()
@@ -62,14 +82,22 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .icon(icon)
         .menu(&menu)
         .tooltip("Pave - Window Tiling")
-        .on_menu_event(move |app, event| match event.id().as_ref() {
-            "settings" => {
-                show_settings(app);
+        .on_menu_event(move |app, event| {
+            let id = event.id().as_ref();
+            match id {
+                "settings" => {
+                    show_settings(app);
+                }
+                "quit" => {
+                    app.exit(0);
+                }
+                _ if id.starts_with("preset_") => {
+                    let name = id.strip_prefix("preset_").unwrap_or("");
+                    log::info!("Tray: activating preset '{name}'");
+                    let _ = preset_tx.send(name.to_string());
+                }
+                _ => {}
             }
-            "quit" => {
-                app.exit(0);
-            }
-            _ => {}
         })
         .on_tray_icon_event(|tray, event| {
             if let tauri::tray::TrayIconEvent::Click {

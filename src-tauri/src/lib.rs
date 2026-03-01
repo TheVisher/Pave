@@ -1,19 +1,21 @@
 mod config;
 mod platform;
+mod presets;
 mod tiling;
 mod tray;
 
-use config::PaveConfig;
+use config::{PaveConfig, Preset};
 use platform::kwin::KWinBackend;
 use platform::MonitorInfo;
 use std::sync::Arc;
 use tauri::Manager;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 
 struct AppState {
     config: Arc<RwLock<PaveConfig>>,
     tiling_state: Arc<tiling::TilingState>,
     backend: Arc<KWinBackend>,
+    preset_tx: broadcast::Sender<String>,
 }
 
 #[tauri::command]
@@ -50,6 +52,49 @@ async fn is_first_run() -> Result<bool, String> {
     Ok(PaveConfig::is_first_run())
 }
 
+#[tauri::command]
+async fn capture_preset(
+    state: tauri::State<'_, AppState>,
+    name: String,
+) -> Result<Preset, String> {
+    let preset = presets::capture_preset(state.backend.as_ref(), name).await?;
+    let mut cfg = state.config.write().await;
+    // Replace existing preset with same name, or push new
+    if let Some(pos) = cfg.presets.iter().position(|p| p.name == preset.name) {
+        cfg.presets[pos] = preset.clone();
+    } else {
+        cfg.presets.push(preset.clone());
+    }
+    cfg.save()?;
+    Ok(preset)
+}
+
+#[tauri::command]
+async fn activate_preset(
+    state: tauri::State<'_, AppState>,
+    name: String,
+) -> Result<(), String> {
+    let cfg = state.config.read().await;
+    let preset = cfg
+        .presets
+        .iter()
+        .find(|p| p.name == name)
+        .ok_or_else(|| format!("Preset '{}' not found", name))?
+        .clone();
+    drop(cfg);
+    presets::activate_preset(state.backend.as_ref(), &preset).await
+}
+
+#[tauri::command]
+async fn delete_preset(
+    state: tauri::State<'_, AppState>,
+    name: String,
+) -> Result<(), String> {
+    let mut cfg = state.config.write().await;
+    cfg.presets.retain(|p| p.name != name);
+    cfg.save()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Work around WebKit Wayland protocol error when creating windows
@@ -70,18 +115,19 @@ pub fn run() {
             get_config,
             update_config,
             get_monitors,
-            is_first_run
+            is_first_run,
+            capture_preset,
+            activate_preset,
+            delete_preset
         ])
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // Setup tray icon
-            tray::setup_tray(&handle)?;
-
             // Initialize backend and state in async context
             let handle2 = handle.clone();
             tauri::async_runtime::spawn(async move {
-                let (backend, mut shortcut_rx, mut resize_rx) = match KWinBackend::new().await {
+                let (backend, mut shortcut_rx, mut resize_rx, mut preset_rx) =
+                    match KWinBackend::new().await {
                     Ok(b) => b,
                     Err(e) => {
                         log::error!("Failed to initialize KWin backend: {e}");
@@ -115,13 +161,20 @@ pub fn run() {
                 }
 
                 let backend_arc = Arc::new(backend);
-                let config_arc = Arc::new(RwLock::new(config));
+                let config_arc = Arc::new(RwLock::new(config.clone()));
                 let tiling_state_arc = Arc::new(tiling::TilingState::new());
+                let (preset_tx, mut preset_tray_rx) = broadcast::channel::<String>(16);
+
+                // Setup tray icon (needs config for preset menu items)
+                if let Err(e) = tray::setup_tray(&handle2, &config, preset_tx.clone()) {
+                    log::error!("Failed to setup tray: {e}");
+                }
 
                 let state = AppState {
                     config: config_arc.clone(),
                     tiling_state: tiling_state_arc.clone(),
                     backend: backend_arc.clone(),
+                    preset_tx: preset_tx.clone(),
                 };
 
                 handle2.manage(state);
@@ -134,7 +187,7 @@ pub fn run() {
                         tauri::WebviewUrl::App("index.html".into()),
                     )
                     .title("Pave Settings")
-                    .inner_size(480.0, 400.0)
+                    .inner_size(480.0, 560.0)
                     .resizable(false)
                     .center()
                     .build()
@@ -215,6 +268,36 @@ pub fn run() {
                                 Err(e) => {
                                     log::error!("Resize receiver error: {e}");
                                     break;
+                                }
+                            }
+                        }
+                        // Preset activation via D-Bus (CLI / CiderDeck)
+                        result = preset_rx.recv() => {
+                            if let Ok(name) = result {
+                                log::info!("Activating preset via D-Bus: {name}");
+                                let cfg = config_arc.read().await;
+                                if let Some(preset) = cfg.presets.iter().find(|p| p.name == name).cloned() {
+                                    drop(cfg);
+                                    if let Err(e) = presets::activate_preset(backend_arc.as_ref(), &preset).await {
+                                        log::error!("Preset activation failed: {e}");
+                                    }
+                                } else {
+                                    log::warn!("Preset '{name}' not found");
+                                }
+                            }
+                        }
+                        // Preset activation via tray menu
+                        result = preset_tray_rx.recv() => {
+                            if let Ok(name) = result {
+                                log::info!("Activating preset via tray: {name}");
+                                let cfg = config_arc.read().await;
+                                if let Some(preset) = cfg.presets.iter().find(|p| p.name == name).cloned() {
+                                    drop(cfg);
+                                    if let Err(e) = presets::activate_preset(backend_arc.as_ref(), &preset).await {
+                                        log::error!("Preset activation failed: {e}");
+                                    }
+                                } else {
+                                    log::warn!("Preset '{name}' not found");
                                 }
                             }
                         }

@@ -49,6 +49,19 @@ impl PaveResizeReceiver {
     }
 }
 
+/// D-Bus object that receives preset activation requests (from CLI or CiderDeck)
+struct PavePresetReceiver {
+    sender: broadcast::Sender<String>,
+}
+
+#[interface(name = "com.pave.Presets")]
+impl PavePresetReceiver {
+    async fn activate(&self, name: &str) {
+        log::info!("Preset activation requested via D-Bus: {name}");
+        let _ = self.sender.send(name.to_string());
+    }
+}
+
 pub struct KWinBackend {
     connection: Connection,
     result_sender: Arc<Mutex<Option<oneshot::Sender<String>>>>,
@@ -56,10 +69,15 @@ pub struct KWinBackend {
 
 impl KWinBackend {
     /// Create a new KWin backend. Returns the backend and broadcast receivers
-    /// for shortcut press events and resize events (kept separate so the backend
-    /// can be wrapped in Arc).
+    /// for shortcut press events, resize events, and preset activation requests
+    /// (kept separate so the backend can be wrapped in Arc).
     pub async fn new() -> Result<
-        (Self, broadcast::Receiver<String>, broadcast::Receiver<String>),
+        (
+            Self,
+            broadcast::Receiver<String>,
+            broadcast::Receiver<String>,
+            broadcast::Receiver<String>,
+        ),
         String,
     > {
         let connection = Connection::session()
@@ -71,6 +89,7 @@ impl KWinBackend {
 
         let (shortcut_tx, shortcut_rx) = broadcast::channel(16);
         let (resize_tx, resize_rx) = broadcast::channel(16);
+        let (preset_tx, preset_rx) = broadcast::channel(16);
 
         // Register D-Bus objects for script data callbacks, shortcut presses, and resize events
         let script_receiver = PaveScriptReceiver {
@@ -81,6 +100,9 @@ impl KWinBackend {
         };
         let resize_receiver = PaveResizeReceiver {
             sender: resize_tx,
+        };
+        let preset_receiver = PavePresetReceiver {
+            sender: preset_tx,
         };
 
         connection
@@ -101,6 +123,12 @@ impl KWinBackend {
             .await
             .map_err(|e| format!("Failed to register resize receiver: {e}"))?;
 
+        connection
+            .object_server()
+            .at("/com/pave/Presets", preset_receiver)
+            .await
+            .map_err(|e| format!("Failed to register preset receiver: {e}"))?;
+
         // Request a well-known name so KWin scripts can find us
         connection
             .request_name("com.pave.app")
@@ -114,6 +142,7 @@ impl KWinBackend {
             },
             shortcut_rx,
             resize_rx,
+            preset_rx,
         ))
     }
 
@@ -348,6 +377,7 @@ impl KWinBackend {
                         height: Math.round(c.frameGeometry.height),
                         maximized: !!(c.maximizedHorizontally && c.maximizedVertically),
                         minimized: !!c.minimized,
+                        resource_class: c.resourceClass || "",
                         active: (c === workspace.activeWindow),
                         desktop: c.desktops.length > 0 ? c.desktops[0].x11DesktopNumber : -1,
                         screen: c.output ? c.output.name : ""
@@ -435,6 +465,7 @@ impl KWinBackend {
                     height: Math.round(c.frameGeometry.height),
                     maximized: !!(c.maximizedHorizontally && c.maximizedVertically),
                     minimized: !!c.minimized,
+                    resource_class: c.resourceClass || "",
                     active: true,
                     desktop: c.desktops.length > 0 ? c.desktops[0].x11DesktopNumber : -1,
                     screen: c.output ? c.output.name : ""

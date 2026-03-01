@@ -15,6 +15,8 @@ pub struct WindowInfo {
     #[serde(default)]
     pub minimized: bool,
     #[serde(default)]
+    pub resource_class: String,
+    #[serde(default)]
     pub active: bool,
     #[serde(default)]
     pub desktop: i32,

@@ -3,6 +3,23 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowSlot {
+    pub window_class: String,
+    pub launch_command: Option<String>,
+    pub monitor: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Preset {
+    pub name: String,
+    pub slots: Vec<WindowSlot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaveConfig {
     #[serde(default = "default_gap_size")]
     pub gap_size: u32,
@@ -12,6 +29,8 @@ pub struct PaveConfig {
     pub autostart: bool,
     #[serde(default)]
     pub corner_radius: Option<u32>,
+    #[serde(default)]
+    pub presets: Vec<Preset>,
 }
 
 fn default_gap_size() -> u32 {
@@ -25,6 +44,7 @@ impl Default for PaveConfig {
             excluded_monitors: Vec::new(),
             autostart: false,
             corner_radius: None,
+            presets: Vec::new(),
         }
     }
 }

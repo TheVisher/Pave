@@ -1,10 +1,26 @@
 import { invoke } from "@tauri-apps/api/core";
 
+interface WindowSlot {
+  window_class: string;
+  launch_command: string | null;
+  monitor: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface Preset {
+  name: string;
+  slots: WindowSlot[];
+}
+
 interface PaveConfig {
   gap_size: number;
   excluded_monitors: string[];
   autostart: boolean;
   corner_radius: number | null;
+  presets: Preset[];
 }
 
 interface MonitorInfo {
@@ -20,6 +36,7 @@ let currentConfig: PaveConfig = {
   excluded_monitors: [],
   autostart: false,
   corner_radius: null,
+  presets: [],
 };
 
 const gapSlider = () => document.getElementById("gap-slider") as HTMLInputElement;
@@ -28,6 +45,8 @@ const cornerSlider = () => document.getElementById("corner-slider") as HTMLInput
 const cornerValue = () => document.getElementById("corner-value")!;
 const monitorsListEl = () => document.getElementById("monitors-list")!;
 const autostartToggle = () => document.getElementById("autostart-toggle") as HTMLInputElement;
+const presetsListEl = () => document.getElementById("presets-list")!;
+const capturePresetBtn = () => document.getElementById("capture-preset-btn")!;
 const saveBtn = () => document.getElementById("save-btn")!;
 const statusMsg = () => document.getElementById("status-msg")!;
 
@@ -95,7 +114,7 @@ function collectConfig(): PaveConfig {
   const corner = parseInt(cornerSlider().value, 10);
   const corner_radius = corner > 0 ? corner : null;
 
-  return { gap_size: gap, excluded_monitors: excluded, autostart, corner_radius };
+  return { gap_size: gap, excluded_monitors: excluded, autostart, corner_radius, presets: currentConfig.presets };
 }
 
 async function saveConfig() {
@@ -119,10 +138,94 @@ function showStatus(msg: string, isError: boolean) {
   }, 3000);
 }
 
+function renderPresets() {
+  const list = presetsListEl();
+  const presets = currentConfig.presets || [];
+
+  if (presets.length === 0) {
+    list.innerHTML = '<p class="loading">No presets saved</p>';
+    return;
+  }
+
+  list.innerHTML = "";
+  for (const preset of presets) {
+    const row = document.createElement("div");
+    row.className = "preset-row";
+
+    const name = document.createElement("span");
+    name.className = "preset-name";
+    name.textContent = preset.name;
+
+    const info = document.createElement("span");
+    info.className = "preset-info";
+    info.textContent = `${preset.slots.length} window${preset.slots.length !== 1 ? "s" : ""}`;
+
+    const actions = document.createElement("div");
+    actions.className = "preset-actions";
+
+    const activateBtn = document.createElement("button");
+    activateBtn.className = "btn-small";
+    activateBtn.textContent = "Activate";
+    activateBtn.addEventListener("click", async () => {
+      try {
+        await invoke("activate_preset", { name: preset.name });
+        showStatus(`Activated: ${preset.name}`, false);
+      } catch (e) {
+        showStatus(`Failed to activate: ${e}`, true);
+      }
+    });
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "btn-small btn-danger";
+    deleteBtn.textContent = "Delete";
+    deleteBtn.addEventListener("click", async () => {
+      try {
+        await invoke("delete_preset", { name: preset.name });
+        currentConfig.presets = currentConfig.presets.filter(
+          (p) => p.name !== preset.name
+        );
+        renderPresets();
+        showStatus(`Deleted: ${preset.name}`, false);
+      } catch (e) {
+        showStatus(`Failed to delete: ${e}`, true);
+      }
+    });
+
+    actions.appendChild(activateBtn);
+    actions.appendChild(deleteBtn);
+
+    row.appendChild(name);
+    row.appendChild(info);
+    row.appendChild(actions);
+    list.appendChild(row);
+  }
+}
+
+async function capturePreset() {
+  const name = prompt("Preset name:");
+  if (!name || !name.trim()) return;
+
+  try {
+    const preset = await invoke<Preset>("capture_preset", { name: name.trim() });
+    // Update local config
+    const idx = currentConfig.presets.findIndex((p) => p.name === preset.name);
+    if (idx >= 0) {
+      currentConfig.presets[idx] = preset;
+    } else {
+      currentConfig.presets.push(preset);
+    }
+    renderPresets();
+    showStatus(`Saved preset: ${preset.name} (${preset.slots.length} windows)`, false);
+  } catch (e) {
+    showStatus(`Failed to capture: ${e}`, true);
+  }
+}
+
 window.addEventListener("DOMContentLoaded", async () => {
-  // Load config first, then monitors (monitors display depends on config)
+  // Load config first, then monitors and presets (display depends on config)
   await loadConfig();
   await loadMonitors();
+  renderPresets();
 
   gapSlider().addEventListener("input", () => {
     gapValue().textContent = gapSlider().value;
@@ -132,5 +235,6 @@ window.addEventListener("DOMContentLoaded", async () => {
     cornerValue().textContent = cornerSlider().value;
   });
 
+  capturePresetBtn().addEventListener("click", capturePreset);
   saveBtn().addEventListener("click", saveConfig);
 });
