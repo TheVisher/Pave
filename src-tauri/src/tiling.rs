@@ -646,53 +646,51 @@ pub async fn handle_snap_vertical(
         .get_last_action(&window.id)
         .map(|(a, _)| a);
 
-    // Normalize fraction actions to base side for quartering
+    // Determine side context from last action
     let side_context = last_action.as_deref().and_then(|a| {
-        if a.starts_with("snap_left") {
+        if a.starts_with("snap_left") || a.starts_with("snap_top_left") || a.starts_with("snap_bottom_left") {
             Some("left")
-        } else if a.starts_with("snap_right") {
+        } else if a.starts_with("snap_right") || a.starts_with("snap_top_right") || a.starts_with("snap_bottom_right") {
             Some("right")
-        } else if a.starts_with("snap_top_left") || a.starts_with("snap_bottom_left") {
-            Some("quarter_left")
-        } else if a.starts_with("snap_top_right") || a.starts_with("snap_bottom_right") {
-            Some("quarter_right")
         } else {
             None
         }
     });
 
-    let (target_rect, target_action) = match (side_context, direction) {
-        // Half or fraction snap → quarter (always standard 1/2 width)
-        (Some("left"), SnapVertical::Up) => {
-            (snap_top_left_rect(monitor, config.gap_size), "snap_top_left")
-        }
-        (Some("left"), SnapVertical::Down) => {
-            (snap_bottom_left_rect(monitor, config.gap_size), "snap_bottom_left")
-        }
-        (Some("right"), SnapVertical::Up) => {
-            (snap_top_right_rect(monitor, config.gap_size), "snap_top_right")
-        }
-        (Some("right"), SnapVertical::Down) => {
-            (snap_bottom_right_rect(monitor, config.gap_size), "snap_bottom_right")
-        }
-        // Quarter → flip vertical (same side)
-        (Some("quarter_left"), SnapVertical::Up) => {
-            (snap_top_left_rect(monitor, config.gap_size), "snap_top_left")
-        }
-        (Some("quarter_left"), SnapVertical::Down) => {
-            (snap_bottom_left_rect(monitor, config.gap_size), "snap_bottom_left")
-        }
-        (Some("quarter_right"), SnapVertical::Up) => {
-            (snap_top_right_rect(monitor, config.gap_size), "snap_top_right")
-        }
-        (Some("quarter_right"), SnapVertical::Down) => {
-            (snap_bottom_right_rect(monitor, config.gap_size), "snap_bottom_right")
-        }
-        // No relevant prior snap context → no-op
-        _ => {
+    let side_context = match side_context {
+        Some(s) => s,
+        None => {
             log::debug!("Snap vertical: no snap context, ignoring");
             return Ok(());
         }
+    };
+
+    // Preserve current width and x — just split vertically
+    let g = config.gap_size as i32;
+    let current_rect = window_to_rect(&window);
+    let half_h = monitor.height / 2;
+
+    let target_rect = match direction {
+        SnapVertical::Up => Rect {
+            x: current_rect.x,
+            y: monitor.y + g,
+            width: current_rect.width,
+            height: half_h - g - g / 2,
+        },
+        SnapVertical::Down => Rect {
+            x: current_rect.x,
+            y: monitor.y + half_h + g / 2,
+            width: current_rect.width,
+            height: monitor.height - half_h - g - g / 2,
+        },
+    };
+
+    let target_action = match (side_context, direction) {
+        ("left", SnapVertical::Up) => "snap_top_left",
+        ("left", SnapVertical::Down) => "snap_bottom_left",
+        ("right", SnapVertical::Up) => "snap_top_right",
+        ("right", SnapVertical::Down) => "snap_bottom_right",
+        _ => unreachable!(),
     };
 
     log::info!(
@@ -908,51 +906,49 @@ fn horizontal_overlap(a_x: i32, a_w: i32, b_x: i32, b_w: i32) -> bool {
     overlap * 100 / min_width > 50
 }
 
-/// Find the adjacent window on the given edge of the resized window.
+/// Find all adjacent windows on the given edge of the resized window.
 /// Uses the **old** geometry of the resized window for adjacency detection,
-/// since the edge has already moved.
-fn find_adjacent_window<'a>(
+/// since the edge has already moved. Any window whose edge is close enough
+/// counts — no overlap threshold, so stacked windows (e.g. two quarters
+/// next to a half) are all detected.
+fn find_adjacent_windows<'a>(
     edge: ResizedEdge,
     old_rect: &Rect,
     windows: &'a [WindowInfo],
     resized_window_id: &str,
     monitor: &MonitorInfo,
     gap: u32,
-) -> Option<&'a WindowInfo> {
+) -> Vec<&'a WindowInfo> {
     let tolerance = gap as i32 + 20;
 
-    windows.iter().find(|w| {
+    windows.iter().filter(|w| {
         if w.id == resized_window_id || w.minimized || !is_window_on_monitor(w, monitor) {
             return false;
         }
 
         match edge {
             ResizedEdge::Right => {
-                // Adjacent window's left edge should be near the old right edge
                 let old_right = old_rect.x + old_rect.width;
                 let distance = (w.x - old_right).abs();
                 distance <= tolerance && vertical_overlap(old_rect.y, old_rect.height, w.y, w.height)
             }
             ResizedEdge::Left => {
-                // Adjacent window's right edge should be near the old left edge
                 let adj_right = w.x + w.width;
                 let distance = (adj_right - old_rect.x).abs();
                 distance <= tolerance && vertical_overlap(old_rect.y, old_rect.height, w.y, w.height)
             }
             ResizedEdge::Bottom => {
-                // Adjacent window's top edge should be near the old bottom edge
                 let old_bottom = old_rect.y + old_rect.height;
                 let distance = (w.y - old_bottom).abs();
                 distance <= tolerance && horizontal_overlap(old_rect.x, old_rect.width, w.x, w.width)
             }
             ResizedEdge::Top => {
-                // Adjacent window's bottom edge should be near the old top edge
                 let adj_bottom = w.y + w.height;
                 let distance = (adj_bottom - old_rect.y).abs();
                 distance <= tolerance && horizontal_overlap(old_rect.x, old_rect.width, w.x, w.width)
             }
         }
-    })
+    }).collect()
 }
 
 /// Calculate the new geometry for the adjacent window so it fills the remaining
@@ -1058,7 +1054,7 @@ pub async fn handle_resize_event(
         }
     };
 
-    let adj = find_adjacent_window(
+    let adjacents = find_adjacent_windows(
         edge,
         &event.old_geometry,
         &windows,
@@ -1067,43 +1063,133 @@ pub async fn handle_resize_event(
         config.gap_size,
     );
 
-    let adj = match adj {
-        Some(w) => w,
-        None => {
-            log::debug!("Resize event: no adjacent window found on {:?} edge", edge);
-            return Ok(());
-        }
-    };
-
-    log::info!(
-        "Resize event: adjacent window '{}' ({}), resizing",
-        adj.title, adj.id
-    );
-
-    let new_rect = calculate_adjacent_resize(
-        edge,
-        &event.new_geometry,
-        adj,
-        monitor,
-        config.gap_size,
-    );
-
-    // Sanity check: skip if result would be too small
-    if new_rect.width < 100 || new_rect.height < 100 {
-        log::info!(
-            "Resize event: skipping — adjacent window would be too small ({}x{})",
-            new_rect.width, new_rect.height
-        );
+    if adjacents.is_empty() {
+        log::debug!("Resize event: no adjacent windows found on {:?} edge", edge);
         return Ok(());
     }
 
-    wm.move_window(&adj.id, new_rect.x, new_rect.y, new_rect.width, new_rect.height)
-        .await?;
+    log::info!("Resize event: found {} adjacent window(s) on {:?} edge", adjacents.len(), edge);
 
-    log::info!(
-        "Resize event: resized '{}' to ({},{} {}x{})",
-        adj.title, new_rect.x, new_rect.y, new_rect.width, new_rect.height
-    );
+    let adjacent_ids: Vec<String> = adjacents.iter().map(|w| w.id.clone()).collect();
+
+    for adj in &adjacents {
+        let new_rect = calculate_adjacent_resize(
+            edge,
+            &event.new_geometry,
+            adj,
+            monitor,
+            config.gap_size,
+        );
+
+        // Sanity check: skip if result would be too small
+        if new_rect.width < 100 || new_rect.height < 100 {
+            log::info!(
+                "Resize event: skipping '{}' — would be too small ({}x{})",
+                adj.title, new_rect.width, new_rect.height
+            );
+            continue;
+        }
+
+        wm.move_window(&adj.id, new_rect.x, new_rect.y, new_rect.width, new_rect.height)
+            .await?;
+
+        log::info!(
+            "Resize event: resized '{}' to ({},{} {}x{})",
+            adj.title, new_rect.x, new_rect.y, new_rect.width, new_rect.height
+        );
+    }
+
+    // Sibling detection: find windows sharing the same edge as the resized window
+    // (e.g. Dolphin stacked below Zed — both have the same left x).
+    // Move their edge by the same delta so the stack stays aligned.
+    let tolerance = config.gap_size as i32 + 20;
+    let siblings: Vec<&WindowInfo> = windows.iter().filter(|w| {
+        if w.id == event.window_id || w.minimized || !is_window_on_monitor(w, monitor) {
+            return false;
+        }
+        if adjacent_ids.contains(&w.id) {
+            return false; // already handled as adjacent
+        }
+        match edge {
+            ResizedEdge::Left => (w.x - event.old_geometry.x).abs() <= tolerance,
+            ResizedEdge::Right => {
+                let w_right = w.x + w.width;
+                let old_right = event.old_geometry.x + event.old_geometry.width;
+                (w_right - old_right).abs() <= tolerance
+            }
+            ResizedEdge::Top => (w.y - event.old_geometry.y).abs() <= tolerance,
+            ResizedEdge::Bottom => {
+                let w_bottom = w.y + w.height;
+                let old_bottom = event.old_geometry.y + event.old_geometry.height;
+                (w_bottom - old_bottom).abs() <= tolerance
+            }
+        }
+    }).collect();
+
+    if !siblings.is_empty() {
+        log::info!("Resize event: found {} sibling window(s) sharing {:?} edge", siblings.len(), edge);
+    }
+
+    for sib in &siblings {
+        let new_rect = match edge {
+            ResizedEdge::Left => {
+                let dx = event.new_geometry.x - event.old_geometry.x;
+                Rect {
+                    x: sib.x + dx,
+                    y: sib.y,
+                    width: sib.width - dx,
+                    height: sib.height,
+                }
+            }
+            ResizedEdge::Right => {
+                let old_right = event.old_geometry.x + event.old_geometry.width;
+                let new_right = event.new_geometry.x + event.new_geometry.width;
+                let dw = new_right - old_right;
+                Rect {
+                    x: sib.x,
+                    y: sib.y,
+                    width: sib.width + dw,
+                    height: sib.height,
+                }
+            }
+            ResizedEdge::Top => {
+                let dy = event.new_geometry.y - event.old_geometry.y;
+                Rect {
+                    x: sib.x,
+                    y: sib.y + dy,
+                    width: sib.width,
+                    height: sib.height - dy,
+                }
+            }
+            ResizedEdge::Bottom => {
+                let old_bottom = event.old_geometry.y + event.old_geometry.height;
+                let new_bottom = event.new_geometry.y + event.new_geometry.height;
+                let dh = new_bottom - old_bottom;
+                Rect {
+                    x: sib.x,
+                    y: sib.y,
+                    width: sib.width,
+                    height: sib.height + dh,
+                }
+            }
+        };
+
+        if new_rect.width < 100 || new_rect.height < 100 {
+            log::info!(
+                "Resize event: skipping sibling '{}' — would be too small ({}x{})",
+                sib.title, new_rect.width, new_rect.height
+            );
+            continue;
+        }
+
+        wm.move_window(&sib.id, new_rect.x, new_rect.y, new_rect.width, new_rect.height)
+            .await?;
+
+        log::info!(
+            "Resize event: resized sibling '{}' to ({},{} {}x{})",
+            sib.title, new_rect.x, new_rect.y, new_rect.width, new_rect.height
+        );
+    }
 
     Ok(())
 }
