@@ -31,6 +31,8 @@ pub struct PaveConfig {
     pub corner_radius: Option<u32>,
     #[serde(default)]
     pub presets: Vec<Preset>,
+    #[serde(default)]
+    pub restore_session: bool,
 }
 
 fn default_gap_size() -> u32 {
@@ -45,6 +47,7 @@ impl Default for PaveConfig {
             autostart: false,
             corner_radius: None,
             presets: Vec::new(),
+            restore_session: false,
         }
     }
 }

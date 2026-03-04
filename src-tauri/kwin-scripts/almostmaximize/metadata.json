@@ -1,0 +1,16 @@
+{
+    "KPlugin": {
+        "Id": "almostmaximize",
+        "Name": "Almost Maximize",
+        "Description": "Resize window to fill the screen with a 15px gap on all sides",
+        "Version": "1.0",
+        "Authors": [
+            {
+                "Name": "eaholum"
+            }
+        ]
+    },
+    "KPackageStructure": "KWin/Script",
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
+}

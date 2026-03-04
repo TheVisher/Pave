@@ -10,12 +10,20 @@ use std::time::Instant;
 pub struct TilingState {
     /// Last action per window: (action_name, monitor_index, timestamp)
     last_action: Mutex<HashMap<String, (String, usize, Instant)>>,
+    /// Original geometry before first snap/maximize/grow (for restore)
+    pre_snap_geometry: Mutex<HashMap<String, Rect>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SnapSide {
     Left,
     Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SnapVertical {
+    Up,
+    Down,
 }
 
 /// Geometry rectangle
@@ -51,6 +59,7 @@ impl TilingState {
     pub fn new() -> Self {
         Self {
             last_action: Mutex::new(HashMap::new()),
+            pre_snap_geometry: Mutex::new(HashMap::new()),
         }
     }
 
@@ -73,10 +82,26 @@ impl TilingState {
         );
     }
 
-    #[allow(dead_code)]
     fn clear_last_action(&self, window_id: &str) {
         let mut actions = self.last_action.lock().unwrap();
         actions.remove(window_id);
+    }
+
+    /// Save original geometry before first snap. Returns true if saved (no prior entry).
+    fn save_pre_snap_geometry(&self, window_id: &str, rect: Rect) -> bool {
+        let mut geo = self.pre_snap_geometry.lock().unwrap();
+        if geo.contains_key(window_id) {
+            false
+        } else {
+            geo.insert(window_id.to_string(), rect);
+            true
+        }
+    }
+
+    /// Remove and return pre-snap geometry for restore.
+    fn take_pre_snap_geometry(&self, window_id: &str) -> Option<Rect> {
+        let mut geo = self.pre_snap_geometry.lock().unwrap();
+        geo.remove(window_id)
     }
 }
 
@@ -138,6 +163,100 @@ fn snap_right_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
         x: monitor.x + half_w + g / 2,
         y: monitor.y + g,
         width: monitor.width - half_w - g - g / 2,
+        height: monitor.height - 2 * g,
+    }
+}
+
+/// Calculate top-left quarter snap geometry
+fn snap_top_left_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
+    let g = gap as i32;
+    Rect {
+        x: monitor.x + g,
+        y: monitor.y + g,
+        width: monitor.width / 2 - g - g / 2,
+        height: monitor.height / 2 - g - g / 2,
+    }
+}
+
+/// Calculate top-right quarter snap geometry
+fn snap_top_right_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
+    let g = gap as i32;
+    let half_w = monitor.width / 2;
+    Rect {
+        x: monitor.x + half_w + g / 2,
+        y: monitor.y + g,
+        width: monitor.width - half_w - g - g / 2,
+        height: monitor.height / 2 - g - g / 2,
+    }
+}
+
+/// Calculate bottom-left quarter snap geometry
+fn snap_bottom_left_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
+    let g = gap as i32;
+    let half_h = monitor.height / 2;
+    Rect {
+        x: monitor.x + g,
+        y: monitor.y + half_h + g / 2,
+        width: monitor.width / 2 - g - g / 2,
+        height: monitor.height - half_h - g - g / 2,
+    }
+}
+
+/// Calculate bottom-right quarter snap geometry
+fn snap_bottom_right_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
+    let g = gap as i32;
+    let half_w = monitor.width / 2;
+    let half_h = monitor.height / 2;
+    Rect {
+        x: monitor.x + half_w + g / 2,
+        y: monitor.y + half_h + g / 2,
+        width: monitor.width - half_w - g - g / 2,
+        height: monitor.height - half_h - g - g / 2,
+    }
+}
+
+/// Calculate left two-thirds snap geometry
+fn snap_left_two_thirds_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
+    let g = gap as i32;
+    Rect {
+        x: monitor.x + g,
+        y: monitor.y + g,
+        width: monitor.width * 2 / 3 - g - g / 2,
+        height: monitor.height - 2 * g,
+    }
+}
+
+/// Calculate left one-third snap geometry
+fn snap_left_one_third_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
+    let g = gap as i32;
+    Rect {
+        x: monitor.x + g,
+        y: monitor.y + g,
+        width: monitor.width / 3 - g - g / 2,
+        height: monitor.height - 2 * g,
+    }
+}
+
+/// Calculate right two-thirds snap geometry
+fn snap_right_two_thirds_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
+    let g = gap as i32;
+    let one_third = monitor.width / 3;
+    Rect {
+        x: monitor.x + one_third + g / 2,
+        y: monitor.y + g,
+        width: monitor.width - one_third - g - g / 2,
+        height: monitor.height - 2 * g,
+    }
+}
+
+/// Calculate right one-third snap geometry
+fn snap_right_one_third_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
+    let g = gap as i32;
+    let two_thirds = monitor.width * 2 / 3;
+    Rect {
+        x: monitor.x + two_thirds + g / 2,
+        y: monitor.y + g,
+        width: monitor.width - two_thirds - g - g / 2,
         height: monitor.height - 2 * g,
     }
 }
@@ -340,6 +459,7 @@ pub async fn handle_maximize(
     } else {
         // Neither -> almost-maximize
         log::info!("Action: almost-maximize");
+        state.save_pre_snap_geometry(&window.id, current_rect);
         wm.move_window(&window.id, almost_rect.x, almost_rect.y, almost_rect.width, almost_rect.height)
             .await?;
         state.set_last_action(&window.id, "almost_maximize", mon_idx);
@@ -382,40 +502,102 @@ pub async fn handle_snap(
 
     let current_rect = window_to_rect(&window);
 
-    // Check if already snapped to this side on this monitor
-    let already_snapped = rects_approx_equal(&current_rect, &standard_rect);
-
-    // Also check if already in a smart-detected space (via last action tracking)
-    let was_last_action_same = state
+    // If currently in a quarter, left/right escapes to full half snap on that side
+    let last_action_name = state
         .get_last_action(&window.id)
-        .map(|(a, m)| a == action_name && m == mon_idx)
-        .unwrap_or(false);
+        .map(|(a, _)| a);
+    let is_quarter = matches!(
+        last_action_name.as_deref(),
+        Some("snap_top_left") | Some("snap_top_right") | Some("snap_bottom_left") | Some("snap_bottom_right")
+    );
 
-    if already_snapped || was_last_action_same {
-        // Already snapped to this side -> cycle to next monitor
-        let next_idx = next_monitor_index(mon_idx, &sorted, &config.excluded_monitors);
-        if next_idx != mon_idx {
-            let next_monitor = &monitors[next_idx];
-            // move_window handles unmaximize atomically
-            let next_rect = match side {
-                SnapSide::Left => snap_left_rect(next_monitor, config.gap_size),
-                SnapSide::Right => snap_right_rect(next_monitor, config.gap_size),
-            };
-            wm.move_window(
-                &window.id,
-                next_rect.x,
-                next_rect.y,
-                next_rect.width,
-                next_rect.height,
-            )
-            .await?;
-            state.set_last_action(&window.id, action_name, next_idx);
-        }
+    if is_quarter {
+        // Escape from quarter to full half snap on the pressed side
+        wm.move_window(
+            &window.id,
+            standard_rect.x,
+            standard_rect.y,
+            standard_rect.width,
+            standard_rect.height,
+        )
+        .await?;
+        state.set_last_action(&window.id, action_name, mon_idx);
         return Ok(());
     }
 
-    // Not already snapped -> try smart space detection first
-    // move_window handles unmaximize atomically if needed
+    // Build fraction rects for this side on the current monitor
+    let half_rect = standard_rect;
+    let two_thirds_rect = match side {
+        SnapSide::Left => snap_left_two_thirds_rect(monitor, config.gap_size),
+        SnapSide::Right => snap_right_two_thirds_rect(monitor, config.gap_size),
+    };
+    let one_third_rect = match side {
+        SnapSide::Left => snap_left_one_third_rect(monitor, config.gap_size),
+        SnapSide::Right => snap_right_one_third_rect(monitor, config.gap_size),
+    };
+
+    // Detect current fraction by geometry match or last_action fallback
+    let current_fraction = if rects_approx_equal(&current_rect, &half_rect) {
+        Some("half")
+    } else if rects_approx_equal(&current_rect, &two_thirds_rect) {
+        Some("two_thirds")
+    } else if rects_approx_equal(&current_rect, &one_third_rect) {
+        Some("one_third")
+    } else {
+        // Fall back to last_action for smart-space positions
+        let on_same_monitor = state
+            .get_last_action(&window.id)
+            .map(|(_, m)| m == mon_idx)
+            .unwrap_or(false);
+        if on_same_monitor {
+            match last_action_name.as_deref() {
+                Some(a) if a == action_name => Some("half"),
+                Some(a) if a == &format!("{action_name}_two_thirds") => Some("two_thirds"),
+                Some(a) if a == &format!("{action_name}_one_third") => Some("one_third"),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    };
+
+    if let Some(fraction) = current_fraction {
+        // Cycle fractions: 1/2 → 2/3 → 1/3 → next monitor 1/2 → ...
+        let (target_rect, target_action, target_mon) = match fraction {
+            "half" => (two_thirds_rect, format!("{action_name}_two_thirds"), mon_idx),
+            "two_thirds" => (one_third_rect, format!("{action_name}_one_third"), mon_idx),
+            "one_third" | _ => {
+                // Try next monitor
+                let next_idx = next_monitor_index(mon_idx, &sorted, &config.excluded_monitors);
+                if next_idx != mon_idx {
+                    let next_monitor = &monitors[next_idx];
+                    let next_rect = match side {
+                        SnapSide::Left => snap_left_rect(next_monitor, config.gap_size),
+                        SnapSide::Right => snap_right_rect(next_monitor, config.gap_size),
+                    };
+                    (next_rect, action_name.to_string(), next_idx)
+                } else {
+                    // Single monitor: wrap back to 1/2
+                    (half_rect, action_name.to_string(), mon_idx)
+                }
+            }
+        };
+
+        wm.move_window(
+            &window.id,
+            target_rect.x,
+            target_rect.y,
+            target_rect.width,
+            target_rect.height,
+        )
+        .await?;
+        state.set_last_action(&window.id, &target_action, target_mon);
+        return Ok(());
+    }
+
+    // Fresh snap — save pre-snap geometry, try smart space, default to 1/2
+    state.save_pre_snap_geometry(&window.id, current_rect);
+
     if let Some(smart_rect) = find_empty_space(side, monitor, &windows, &window.id, config.gap_size) {
         wm.move_window(
             &window.id,
@@ -437,6 +619,242 @@ pub async fn handle_snap(
     }
 
     state.set_last_action(&window.id, action_name, mon_idx);
+    Ok(())
+}
+
+/// Handle snap up/down action (quarter tiling)
+pub async fn handle_snap_vertical(
+    wm: &KWinBackend,
+    config: &PaveConfig,
+    state: &TilingState,
+    direction: SnapVertical,
+) -> Result<(), String> {
+    let window = wm
+        .get_active_window()
+        .await?
+        .ok_or("No active window")?;
+
+    let monitors = wm.get_monitors().await?;
+    if monitors.is_empty() {
+        return Err("No monitors found".to_string());
+    }
+
+    let mon_idx = find_window_monitor(&window, &monitors);
+    let monitor = &monitors[mon_idx];
+
+    let last_action = state
+        .get_last_action(&window.id)
+        .map(|(a, _)| a);
+
+    // Normalize fraction actions to base side for quartering
+    let side_context = last_action.as_deref().and_then(|a| {
+        if a.starts_with("snap_left") {
+            Some("left")
+        } else if a.starts_with("snap_right") {
+            Some("right")
+        } else if a.starts_with("snap_top_left") || a.starts_with("snap_bottom_left") {
+            Some("quarter_left")
+        } else if a.starts_with("snap_top_right") || a.starts_with("snap_bottom_right") {
+            Some("quarter_right")
+        } else {
+            None
+        }
+    });
+
+    let (target_rect, target_action) = match (side_context, direction) {
+        // Half or fraction snap → quarter (always standard 1/2 width)
+        (Some("left"), SnapVertical::Up) => {
+            (snap_top_left_rect(monitor, config.gap_size), "snap_top_left")
+        }
+        (Some("left"), SnapVertical::Down) => {
+            (snap_bottom_left_rect(monitor, config.gap_size), "snap_bottom_left")
+        }
+        (Some("right"), SnapVertical::Up) => {
+            (snap_top_right_rect(monitor, config.gap_size), "snap_top_right")
+        }
+        (Some("right"), SnapVertical::Down) => {
+            (snap_bottom_right_rect(monitor, config.gap_size), "snap_bottom_right")
+        }
+        // Quarter → flip vertical (same side)
+        (Some("quarter_left"), SnapVertical::Up) => {
+            (snap_top_left_rect(monitor, config.gap_size), "snap_top_left")
+        }
+        (Some("quarter_left"), SnapVertical::Down) => {
+            (snap_bottom_left_rect(monitor, config.gap_size), "snap_bottom_left")
+        }
+        (Some("quarter_right"), SnapVertical::Up) => {
+            (snap_top_right_rect(monitor, config.gap_size), "snap_top_right")
+        }
+        (Some("quarter_right"), SnapVertical::Down) => {
+            (snap_bottom_right_rect(monitor, config.gap_size), "snap_bottom_right")
+        }
+        // No relevant prior snap context → no-op
+        _ => {
+            log::debug!("Snap vertical: no snap context, ignoring");
+            return Ok(());
+        }
+    };
+
+    log::info!(
+        "Snap vertical: {} -> {} at ({},{} {}x{})",
+        last_action.as_deref().unwrap_or("none"),
+        target_action,
+        target_rect.x, target_rect.y, target_rect.width, target_rect.height
+    );
+
+    wm.move_window(
+        &window.id,
+        target_rect.x,
+        target_rect.y,
+        target_rect.width,
+        target_rect.height,
+    )
+    .await?;
+
+    state.set_last_action(&window.id, target_action, mon_idx);
+    Ok(())
+}
+
+/// Restore a window to its pre-snap geometry
+pub async fn handle_restore(
+    wm: &KWinBackend,
+    _config: &PaveConfig,
+    state: &TilingState,
+) -> Result<(), String> {
+    let window = wm
+        .get_active_window()
+        .await?
+        .ok_or("No active window")?;
+
+    let saved = state.take_pre_snap_geometry(&window.id);
+    match saved {
+        Some(rect) => {
+            log::info!(
+                "Restore: window '{}' -> ({},{} {}x{})",
+                window.title, rect.x, rect.y, rect.width, rect.height
+            );
+            wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height)
+                .await?;
+            state.clear_last_action(&window.id);
+            Ok(())
+        }
+        None => {
+            log::debug!("Restore: no saved geometry for '{}'", window.title);
+            Ok(())
+        }
+    }
+}
+
+/// Grow or shrink the active window by 10%
+pub async fn handle_grow_shrink(
+    wm: &KWinBackend,
+    _config: &PaveConfig,
+    state: &TilingState,
+    grow: bool,
+) -> Result<(), String> {
+    let window = wm
+        .get_active_window()
+        .await?
+        .ok_or("No active window")?;
+
+    let monitors = wm.get_monitors().await?;
+    if monitors.is_empty() {
+        return Err("No monitors found".to_string());
+    }
+
+    let mon_idx = find_window_monitor(&window, &monitors);
+    let monitor = &monitors[mon_idx];
+
+    let current_rect = window_to_rect(&window);
+
+    // Save original geometry before first grow/shrink
+    state.save_pre_snap_geometry(&window.id, current_rect);
+
+    let scale = if grow { 1.1_f64 } else { 1.0 / 1.1 };
+    let new_w = ((current_rect.width as f64) * scale).round() as i32;
+    let new_h = ((current_rect.height as f64) * scale).round() as i32;
+
+    // Center: adjust x/y by half the size delta
+    let dw = new_w - current_rect.width;
+    let dh = new_h - current_rect.height;
+    let new_x = current_rect.x - dw / 2;
+    let new_y = current_rect.y - dh / 2;
+
+    // Clamp to monitor bounds, minimum 100px
+    let clamped_x = new_x.max(monitor.x);
+    let clamped_y = new_y.max(monitor.y);
+    let clamped_w = new_w
+        .max(100)
+        .min(monitor.x + monitor.width - clamped_x);
+    let clamped_h = new_h
+        .max(100)
+        .min(monitor.y + monitor.height - clamped_y);
+
+    log::info!(
+        "Grow/shrink: '{}' {} -> ({},{} {}x{})",
+        window.title,
+        if grow { "grow" } else { "shrink" },
+        clamped_x, clamped_y, clamped_w, clamped_h
+    );
+
+    wm.move_window(&window.id, clamped_x, clamped_y, clamped_w, clamped_h)
+        .await?;
+
+    // No longer in a snap position
+    state.clear_last_action(&window.id);
+    Ok(())
+}
+
+/// Move all non-minimized windows from the active window's monitor to the next monitor
+pub async fn throw_to_next_monitor(
+    wm: &KWinBackend,
+    config: &PaveConfig,
+) -> Result<(), String> {
+    let active = wm
+        .get_active_window()
+        .await?
+        .ok_or("No active window")?;
+
+    let monitors = wm.get_monitors().await?;
+    if monitors.len() < 2 {
+        return Err("Need at least 2 monitors".to_string());
+    }
+
+    let sorted = sort_monitors(&monitors);
+    let source_idx = find_window_monitor(&active, &monitors);
+    let target_idx = next_monitor_index(source_idx, &sorted, &config.excluded_monitors);
+
+    if target_idx == source_idx {
+        return Err("No other monitor available".to_string());
+    }
+
+    let source = &monitors[source_idx];
+    let target = &monitors[target_idx];
+    let dx = target.x - source.x;
+    let dy = target.y - source.y;
+
+    let windows = wm.get_windows().await?;
+    let on_source: Vec<&WindowInfo> = windows
+        .iter()
+        .filter(|w| !w.minimized && is_window_on_monitor(w, source))
+        .collect();
+
+    log::info!(
+        "Throwing {} windows from '{}' to '{}' (dx={}, dy={})",
+        on_source.len(), source.name, target.name, dx, dy
+    );
+
+    for w in &on_source {
+        wm.move_window(
+            &w.id,
+            w.x + dx,
+            w.y + dy,
+            w.width,
+            w.height,
+        )
+        .await?;
+    }
+
     Ok(())
 }
 

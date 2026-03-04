@@ -2,7 +2,7 @@
 name = "pave"
 version = "0.1.0"
 description = "Smart window tiling manager for Linux"
-authors = ["you"]
+authors = ["eaholum"]
 edition = "2021"
 
 [lib]

@@ -95,6 +95,12 @@ async fn delete_preset(
     cfg.save()
 }
 
+#[tauri::command]
+async fn throw_to_monitor(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let cfg = state.config.read().await.clone();
+    tiling::throw_to_next_monitor(state.backend.as_ref(), &cfg).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Work around WebKit Wayland protocol error when creating windows
@@ -118,7 +124,8 @@ pub fn run() {
             is_first_run,
             capture_preset,
             activate_preset,
-            delete_preset
+            delete_preset,
+            throw_to_monitor
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -164,9 +171,17 @@ pub fn run() {
                 let config_arc = Arc::new(RwLock::new(config.clone()));
                 let tiling_state_arc = Arc::new(tiling::TilingState::new());
                 let (preset_tx, mut preset_tray_rx) = broadcast::channel::<String>(16);
+                let (shutdown_tx, mut shutdown_rx) = broadcast::channel::<()>(1);
 
                 // Setup tray icon (needs config for preset menu items)
-                if let Err(e) = tray::setup_tray(&handle2, &config, preset_tx.clone()) {
+                if let Err(e) = tray::setup_tray(
+                    &handle2,
+                    &config,
+                    preset_tx.clone(),
+                    shutdown_tx.clone(),
+                    backend_arc.clone(),
+                    config_arc.clone(),
+                ) {
                     log::error!("Failed to setup tray: {e}");
                 }
 
@@ -196,7 +211,45 @@ pub fn run() {
                     }
                 }
 
-                // Listen for shortcut presses and resize events via D-Bus callbacks
+                // Session Ghost: restore last session on startup if enabled
+                if config.restore_session {
+                    let cfg = config_arc.read().await;
+                    if let Some(session_preset) = cfg.presets.iter().find(|p| p.name == "__last_session__").cloned() {
+                        drop(cfg);
+                        log::info!("Restoring last session ({} windows)", session_preset.slots.len());
+                        if let Err(e) = presets::activate_preset(backend_arc.as_ref(), &session_preset).await {
+                            log::error!("Session restore failed: {e}");
+                        }
+                    }
+                }
+
+                // Helper closure for preset/throw dispatch via D-Bus or tray channels
+                async fn handle_preset_or_throw(
+                    name: &str,
+                    source: &str,
+                    backend: &KWinBackend,
+                    config_arc: &Arc<RwLock<PaveConfig>>,
+                ) {
+                    if name == "__throw__" {
+                        let cfg = config_arc.read().await.clone();
+                        if let Err(e) = tiling::throw_to_next_monitor(backend, &cfg).await {
+                            log::error!("Throw to monitor failed: {e}");
+                        }
+                    } else {
+                        log::info!("Activating preset via {source}: {name}");
+                        let cfg = config_arc.read().await;
+                        if let Some(preset) = cfg.presets.iter().find(|p| p.name == name).cloned() {
+                            drop(cfg);
+                            if let Err(e) = presets::activate_preset(backend, &preset).await {
+                                log::error!("Preset activation failed: {e}");
+                            }
+                        } else {
+                            log::warn!("Preset '{name}' not found");
+                        }
+                    }
+                }
+
+                // Listen for shortcut presses, resize events, presets, and shutdown
                 loop {
                     tokio::select! {
                         result = shortcut_rx.recv() => {
@@ -226,6 +279,50 @@ pub fn run() {
                                                 &cfg,
                                                 &ts,
                                                 tiling::SnapSide::Right,
+                                            )
+                                            .await
+                                        }
+                                        "pave_snap_up" => {
+                                            tiling::handle_snap_vertical(
+                                                wm.as_ref(),
+                                                &cfg,
+                                                &ts,
+                                                tiling::SnapVertical::Up,
+                                            )
+                                            .await
+                                        }
+                                        "pave_snap_down" => {
+                                            tiling::handle_snap_vertical(
+                                                wm.as_ref(),
+                                                &cfg,
+                                                &ts,
+                                                tiling::SnapVertical::Down,
+                                            )
+                                            .await
+                                        }
+                                        "pave_restore" => {
+                                            tiling::handle_restore(
+                                                wm.as_ref(),
+                                                &cfg,
+                                                &ts,
+                                            )
+                                            .await
+                                        }
+                                        "pave_grow" => {
+                                            tiling::handle_grow_shrink(
+                                                wm.as_ref(),
+                                                &cfg,
+                                                &ts,
+                                                true,
+                                            )
+                                            .await
+                                        }
+                                        "pave_shrink" => {
+                                            tiling::handle_grow_shrink(
+                                                wm.as_ref(),
+                                                &cfg,
+                                                &ts,
+                                                false,
                                             )
                                             .await
                                         }
@@ -271,35 +368,39 @@ pub fn run() {
                                 }
                             }
                         }
-                        // Preset activation via D-Bus (CLI / CiderDeck)
+                        // Preset activation or throw via D-Bus (CLI / CiderDeck)
                         result = preset_rx.recv() => {
                             if let Ok(name) = result {
-                                log::info!("Activating preset via D-Bus: {name}");
-                                let cfg = config_arc.read().await;
-                                if let Some(preset) = cfg.presets.iter().find(|p| p.name == name).cloned() {
-                                    drop(cfg);
-                                    if let Err(e) = presets::activate_preset(backend_arc.as_ref(), &preset).await {
-                                        log::error!("Preset activation failed: {e}");
-                                    }
-                                } else {
-                                    log::warn!("Preset '{name}' not found");
-                                }
+                                handle_preset_or_throw(&name, "D-Bus", backend_arc.as_ref(), &config_arc).await;
                             }
                         }
-                        // Preset activation via tray menu
+                        // Preset activation or throw via tray menu
                         result = preset_tray_rx.recv() => {
                             if let Ok(name) = result {
-                                log::info!("Activating preset via tray: {name}");
-                                let cfg = config_arc.read().await;
-                                if let Some(preset) = cfg.presets.iter().find(|p| p.name == name).cloned() {
-                                    drop(cfg);
-                                    if let Err(e) = presets::activate_preset(backend_arc.as_ref(), &preset).await {
-                                        log::error!("Preset activation failed: {e}");
+                                handle_preset_or_throw(&name, "tray", backend_arc.as_ref(), &config_arc).await;
+                            }
+                        }
+                        // Session Ghost: capture session on shutdown
+                        _ = shutdown_rx.recv() => {
+                            log::info!("Shutdown signal received, saving session...");
+                            match presets::capture_preset(backend_arc.as_ref(), "__last_session__".to_string()).await {
+                                Ok(session_preset) => {
+                                    let mut cfg = config_arc.write().await;
+                                    if let Some(pos) = cfg.presets.iter().position(|p| p.name == "__last_session__") {
+                                        cfg.presets[pos] = session_preset;
+                                    } else {
+                                        cfg.presets.push(session_preset);
                                     }
-                                } else {
-                                    log::warn!("Preset '{name}' not found");
+                                    if let Err(e) = cfg.save() {
+                                        log::error!("Failed to save session preset: {e}");
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to capture session: {e}");
                                 }
                             }
+                            handle2.exit(0);
+                            break;
                         }
                     }
                 }

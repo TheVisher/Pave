@@ -7,6 +7,10 @@ use tauri::WebviewUrl;
 use tokio::sync::broadcast;
 
 use crate::config::PaveConfig;
+use crate::platform::kwin::KWinBackend;
+use crate::tiling;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 fn show_settings(app: &AppHandle) {
     // If window already exists, just focus it
@@ -32,6 +36,9 @@ pub fn setup_tray(
     app: &AppHandle,
     config: &PaveConfig,
     preset_tx: broadcast::Sender<String>,
+    shutdown_tx: broadcast::Sender<()>,
+    backend: Arc<KWinBackend>,
+    config_lock: Arc<RwLock<PaveConfig>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let settings_item = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
     let separator1 = PredefinedMenuItem::separator(app)?;
@@ -46,8 +53,19 @@ pub fn setup_tray(
     let right_label = MenuItemBuilder::with_id("label_right", "Snap Right: Ctrl+Alt+Right")
         .enabled(false)
         .build(app)?;
+    let up_label = MenuItemBuilder::with_id("label_up", "Snap Up: Ctrl+Alt+Up")
+        .enabled(false)
+        .build(app)?;
+    let down_label = MenuItemBuilder::with_id("label_down", "Snap Down: Ctrl+Alt+Down")
+        .enabled(false)
+        .build(app)?;
 
     let separator2 = PredefinedMenuItem::separator(app)?;
+
+    let throw_item = MenuItemBuilder::with_id("throw_monitor", "Throw to Next Monitor")
+        .build(app)?;
+
+    let separator_throw = PredefinedMenuItem::separator(app)?;
 
     let mut menu_builder = MenuBuilder::new(app)
         .item(&settings_item)
@@ -55,7 +73,11 @@ pub fn setup_tray(
         .item(&maximize_label)
         .item(&left_label)
         .item(&right_label)
-        .item(&separator2);
+        .item(&up_label)
+        .item(&down_label)
+        .item(&separator2)
+        .item(&throw_item)
+        .item(&separator_throw);
 
     // Add preset items
     let preset_names: Vec<String> = config.presets.iter().map(|p| p.name.clone()).collect();
@@ -89,7 +111,17 @@ pub fn setup_tray(
                     show_settings(app);
                 }
                 "quit" => {
-                    app.exit(0);
+                    let _ = shutdown_tx.send(());
+                }
+                "throw_monitor" => {
+                    let backend = backend.clone();
+                    let config_lock = config_lock.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let cfg = config_lock.read().await.clone();
+                        if let Err(e) = tiling::throw_to_next_monitor(backend.as_ref(), &cfg).await {
+                            log::error!("Throw to monitor failed: {e}");
+                        }
+                    });
                 }
                 _ if id.starts_with("preset_") => {
                     let name = id.strip_prefix("preset_").unwrap_or("");
