@@ -101,6 +101,30 @@ async fn throw_to_monitor(state: tauri::State<'_, AppState>) -> Result<(), Strin
     tiling::throw_to_next_monitor(state.backend.as_ref(), &cfg).await
 }
 
+/// Kill any stale Pave processes left from a previous run.
+fn kill_stale_processes() {
+    let my_pid = std::process::id();
+    let output = match std::process::Command::new("pgrep")
+        .args(["-x", "pave"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+
+    let pids = String::from_utf8_lossy(&output.stdout);
+    for line in pids.lines() {
+        if let Ok(pid) = line.trim().parse::<u32>() {
+            if pid != my_pid {
+                log::info!("Killing stale Pave process (PID {pid})");
+                let _ = std::process::Command::new("kill")
+                    .arg(pid.to_string())
+                    .status();
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Work around WebKit Wayland protocol error when creating windows
@@ -110,6 +134,10 @@ pub fn run() {
     }
 
     env_logger::init();
+
+    // Kill any stale Pave processes from previous runs (zombie quit, crash, etc.)
+    // This prevents D-Bus name conflicts that break shortcut registration.
+    kill_stale_processes();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

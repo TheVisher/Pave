@@ -302,7 +302,8 @@ impl ZoneTracker {
     }
 
     /// Collect all entries that should be surfaced when a zone is vacated.
-    /// Includes same-zone entries AND entries in child zones that were hidden.
+    /// Includes same-zone entries, entries in child zones, AND entries in
+    /// parent zones (if no sibling child still occupies the parent).
     fn collect_surface_entries(&self, zone_id: &ZoneId) -> Vec<ZoneEntry> {
         let mut entries = Vec::new();
 
@@ -322,6 +323,33 @@ impl ZoneTracker {
             if let Some(zone_entries) = self.zones.get(&child_zone) {
                 if let Some(entry) = zone_entries.last() {
                     entries.push(entry.clone());
+                }
+            }
+        }
+
+        // Surface from parent zones (e.g. TopLeft vacated → surface Left,
+        // but only if no sibling like BottomLeft still occupies).
+        if let Some(parent_side) = zone_id.side.immediate_parent() {
+            let siblings_occupied = parent_side.covered_children().iter().any(|child_side| {
+                if *child_side == zone_id.side {
+                    return false; // Skip the vacated zone itself
+                }
+                let child_zone = ZoneId {
+                    monitor_idx: zone_id.monitor_idx,
+                    side: child_side.clone(),
+                };
+                self.zones.get(&child_zone).map_or(false, |e| !e.is_empty())
+            });
+
+            if !siblings_occupied {
+                let parent_zone = ZoneId {
+                    monitor_idx: zone_id.monitor_idx,
+                    side: parent_side,
+                };
+                if let Some(zone_entries) = self.zones.get(&parent_zone) {
+                    if let Some(entry) = zone_entries.last() {
+                        entries.push(entry.clone());
+                    }
                 }
             }
         }
