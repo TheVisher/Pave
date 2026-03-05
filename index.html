@@ -42,20 +42,24 @@
             <kbd>Ctrl + Alt + Enter</kbd>
           </div>
           <div class="shortcut-row">
-            <span class="shortcut-label">Snap Left</span>
+            <span class="shortcut-label">Snap Left / Shrink</span>
             <kbd>Ctrl + Alt + Left</kbd>
           </div>
           <div class="shortcut-row">
-            <span class="shortcut-label">Snap Right</span>
+            <span class="shortcut-label">Snap Right / Grow</span>
             <kbd>Ctrl + Alt + Right</kbd>
           </div>
           <div class="shortcut-row">
-            <span class="shortcut-label">Snap Up (Quarter)</span>
+            <span class="shortcut-label">Snap Up (Quarter) / Monitor Up</span>
             <kbd>Ctrl + Alt + Up</kbd>
           </div>
           <div class="shortcut-row">
-            <span class="shortcut-label">Snap Down (Quarter)</span>
+            <span class="shortcut-label">Snap Down (Quarter) / Monitor Down</span>
             <kbd>Ctrl + Alt + Down</kbd>
+          </div>
+          <div class="shortcut-row">
+            <span class="shortcut-label">Cycle Tab Zone</span>
+            <kbd>Ctrl + Alt + Tab</kbd>
           </div>
         </div>
       </section>
@@ -66,6 +70,15 @@
           <p class="loading">No presets saved</p>
         </div>
         <button id="capture-preset-btn" class="btn-secondary" type="button">Save Current Layout as Preset</button>
+      </section>
+
+      <section class="setting-group">
+        <label class="toggle-row">
+          <span>Auto-surface tabbed windows</span>
+          <input type="checkbox" id="auto-surface-toggle" checked />
+          <span class="toggle-slider"></span>
+        </label>
+        <p class="setting-hint">When a window leaves a zone, surface the hidden window behind it</p>
       </section>
 
       <section class="setting-group">

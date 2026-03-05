@@ -33,6 +33,12 @@ pub struct PaveConfig {
     pub presets: Vec<Preset>,
     #[serde(default)]
     pub restore_session: bool,
+    #[serde(default = "default_true")]
+    pub auto_surface_tabs: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_gap_size() -> u32 {
@@ -48,6 +54,7 @@ impl Default for PaveConfig {
             corner_radius: None,
             presets: Vec::new(),
             restore_session: false,
+            auto_surface_tabs: true,
         }
     }
 }

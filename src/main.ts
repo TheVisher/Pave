@@ -22,6 +22,7 @@ interface PaveConfig {
   corner_radius: number | null;
   presets: Preset[];
   restore_session: boolean;
+  auto_surface_tabs: boolean;
 }
 
 interface MonitorInfo {
@@ -39,6 +40,7 @@ let currentConfig: PaveConfig = {
   corner_radius: null,
   presets: [],
   restore_session: false,
+  auto_surface_tabs: true,
 };
 
 const gapSlider = () => document.getElementById("gap-slider") as HTMLInputElement;
@@ -46,6 +48,7 @@ const gapValue = () => document.getElementById("gap-value")!;
 const cornerSlider = () => document.getElementById("corner-slider") as HTMLInputElement;
 const cornerValue = () => document.getElementById("corner-value")!;
 const monitorsListEl = () => document.getElementById("monitors-list")!;
+const autoSurfaceToggle = () => document.getElementById("auto-surface-toggle") as HTMLInputElement;
 const restoreSessionToggle = () => document.getElementById("restore-session-toggle") as HTMLInputElement;
 const autostartToggle = () => document.getElementById("autostart-toggle") as HTMLInputElement;
 const presetsListEl = () => document.getElementById("presets-list")!;
@@ -63,6 +66,7 @@ async function loadConfig() {
     cornerValue().textContent = String(cr);
     autostartToggle().checked = currentConfig.autostart;
     restoreSessionToggle().checked = currentConfig.restore_session;
+    autoSurfaceToggle().checked = currentConfig.auto_surface_tabs;
   } catch (e) {
     console.error("Failed to load config:", e);
   }
@@ -119,8 +123,9 @@ function collectConfig(): PaveConfig {
   const corner_radius = corner > 0 ? corner : null;
 
   const restore_session = restoreSessionToggle().checked;
+  const auto_surface_tabs = autoSurfaceToggle().checked;
 
-  return { gap_size: gap, excluded_monitors: excluded, autostart, corner_radius, presets: currentConfig.presets, restore_session };
+  return { gap_size: gap, excluded_monitors: excluded, autostart, corner_radius, presets: currentConfig.presets, restore_session, auto_surface_tabs };
 }
 
 async function saveConfig() {

@@ -100,7 +100,7 @@ pub fn setup_tray(
         .cloned()
         .ok_or("No default icon found")?;
 
-    let _tray = TrayIconBuilder::new()
+    let tray = TrayIconBuilder::new()
         .icon(icon)
         .menu(&menu)
         .tooltip("Pave - Window Tiling")
@@ -112,6 +112,12 @@ pub fn setup_tray(
                 }
                 "quit" => {
                     let _ = shutdown_tx.send(());
+                    // Give the shutdown handler a moment to save session, then hard exit.
+                    // app.exit() only tears down part of the process on Linux.
+                    std::thread::spawn(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        std::process::exit(0);
+                    });
                 }
                 "throw_monitor" => {
                     let backend = backend.clone();
@@ -142,6 +148,10 @@ pub fn setup_tray(
             }
         })
         .build(app)?;
+
+    // Keep the tray icon alive by storing it in managed state.
+    // Without this, the tray event handlers are dropped when this function returns.
+    app.manage(tray);
 
     Ok(())
 }

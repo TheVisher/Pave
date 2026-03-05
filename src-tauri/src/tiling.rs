@@ -6,12 +6,364 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
 
+/// Which logical zone a snap action belongs to
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ZoneSide {
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    Maximize,
+}
+
+impl ZoneSide {
+    fn from_action(action: &str) -> Option<Self> {
+        if action.starts_with("snap_top_left") {
+            Some(ZoneSide::TopLeft)
+        } else if action.starts_with("snap_top_right") {
+            Some(ZoneSide::TopRight)
+        } else if action.starts_with("snap_bottom_left") {
+            Some(ZoneSide::BottomLeft)
+        } else if action.starts_with("snap_bottom_right") {
+            Some(ZoneSide::BottomRight)
+        } else if action.starts_with("snap_left") {
+            Some(ZoneSide::Left)
+        } else if action.starts_with("snap_right") {
+            Some(ZoneSide::Right)
+        } else if action == "almost_maximize" || action == "full_maximize" {
+            Some(ZoneSide::Maximize)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the child zones that this zone fully covers.
+    /// Left covers TopLeft + BottomLeft, Right covers TopRight + BottomRight,
+    /// Maximize covers everything.
+    fn covered_children(&self) -> &'static [ZoneSide] {
+        match self {
+            ZoneSide::Left => &[ZoneSide::TopLeft, ZoneSide::BottomLeft],
+            ZoneSide::Right => &[ZoneSide::TopRight, ZoneSide::BottomRight],
+            ZoneSide::Maximize => &[
+                ZoneSide::Left, ZoneSide::Right,
+                ZoneSide::TopLeft, ZoneSide::TopRight,
+                ZoneSide::BottomLeft, ZoneSide::BottomRight,
+            ],
+            _ => &[],
+        }
+    }
+
+    /// Returns the parent zones that fully cover this zone.
+    /// TopLeft/BottomLeft are covered by Left and Maximize.
+    /// Left/Right are covered by Maximize.
+    fn covering_parents(&self) -> &'static [ZoneSide] {
+        match self {
+            ZoneSide::TopLeft | ZoneSide::BottomLeft => &[ZoneSide::Left, ZoneSide::Maximize],
+            ZoneSide::TopRight | ZoneSide::BottomRight => &[ZoneSide::Right, ZoneSide::Maximize],
+            ZoneSide::Left | ZoneSide::Right => &[ZoneSide::Maximize],
+            _ => &[],
+        }
+    }
+
+    /// Returns the immediate parent zone (not Maximize).
+    fn immediate_parent(&self) -> Option<ZoneSide> {
+        match self {
+            ZoneSide::TopLeft | ZoneSide::BottomLeft => Some(ZoneSide::Left),
+            ZoneSide::TopRight | ZoneSide::BottomRight => Some(ZoneSide::Right),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ZoneId {
+    monitor_idx: usize,
+    side: ZoneSide,
+}
+
+#[derive(Debug, Clone)]
+struct ZoneEntry {
+    window_id: String,
+    snap_action: String,
+    geometry: Rect,
+}
+
+struct ZoneTracker {
+    zones: HashMap<ZoneId, Vec<ZoneEntry>>,
+}
+
+impl ZoneTracker {
+    fn new() -> Self {
+        Self {
+            zones: HashMap::new(),
+        }
+    }
+
+    /// Place a window in a zone. Removes it from any prior zone first.
+    /// Returns the IDs of all displaced windows to minimize (same zone + overlapping zones).
+    /// Windows in overlapping zones are kept in the tracker so they can be surfaced later.
+    fn place_window(
+        &mut self,
+        zone_id: ZoneId,
+        window_id: &str,
+        snap_action: &str,
+        geometry: Rect,
+    ) -> Vec<String> {
+        // Remove from any prior zone
+        self.remove_window(window_id);
+
+        let mut displaced = Vec::new();
+
+        // Displace the active window in the same zone
+        if let Some(entries) = self.zones.get(&zone_id) {
+            if let Some(entry) = entries.last() {
+                if entry.window_id != window_id {
+                    displaced.push(entry.window_id.clone());
+                }
+            }
+        }
+
+        // Collect (but don't remove) windows in covered child zones
+        // e.g. snapping to Right minimizes windows in TopRight + BottomRight
+        for child_side in zone_id.side.covered_children() {
+            let child_zone = ZoneId {
+                monitor_idx: zone_id.monitor_idx,
+                side: child_side.clone(),
+            };
+            if let Some(entries) = self.zones.get(&child_zone) {
+                for entry in entries {
+                    if entry.window_id != window_id && !displaced.contains(&entry.window_id) {
+                        displaced.push(entry.window_id.clone());
+                    }
+                }
+            }
+        }
+
+        // Collect (but don't remove) windows in parent zones that fully cover this zone
+        // e.g. snapping to TopRight minimizes a window in the Right zone
+        for parent_side in zone_id.side.covering_parents() {
+            let parent_zone = ZoneId {
+                monitor_idx: zone_id.monitor_idx,
+                side: parent_side.clone(),
+            };
+            if let Some(entries) = self.zones.get(&parent_zone) {
+                for entry in entries {
+                    if entry.window_id != window_id && !displaced.contains(&entry.window_id) {
+                        displaced.push(entry.window_id.clone());
+                    }
+                }
+            }
+        }
+
+        let entries = self.zones.entry(zone_id).or_default();
+        entries.push(ZoneEntry {
+            window_id: window_id.to_string(),
+            snap_action: snap_action.to_string(),
+            geometry,
+        });
+
+        displaced
+    }
+
+    /// Place a window in a zone without displacing — used for startup scan.
+    /// Just appends to the zone entries without triggering minimizes.
+    fn place_window_silent(
+        &mut self,
+        zone_id: ZoneId,
+        window_id: &str,
+        snap_action: &str,
+        geometry: Rect,
+    ) {
+        // Remove from any prior zone first
+        self.remove_window(window_id);
+
+        let entries = self.zones.entry(zone_id).or_default();
+        entries.push(ZoneEntry {
+            window_id: window_id.to_string(),
+            snap_action: snap_action.to_string(),
+            geometry,
+        });
+    }
+
+    /// Remove a window from whatever zone it's in. Cleans up empty zones.
+    fn remove_window(&mut self, window_id: &str) {
+        let mut empty_zones = Vec::new();
+        for (zone_id, entries) in self.zones.iter_mut() {
+            entries.retain(|e| e.window_id != window_id);
+            if entries.is_empty() {
+                empty_zones.push(zone_id.clone());
+            }
+        }
+        for zone_id in empty_zones {
+            self.zones.remove(&zone_id);
+        }
+    }
+
+    /// Find which zone contains a window
+    fn find_zone(&self, window_id: &str) -> Option<&ZoneId> {
+        for (zone_id, entries) in &self.zones {
+            if entries.iter().any(|e| e.window_id == window_id) {
+                return Some(zone_id);
+            }
+        }
+        None
+    }
+
+    /// Cycle tab groups. Returns (entries to show, window IDs to hide).
+    ///
+    /// Group cycling logic:
+    /// - If current window is in a parent zone (e.g. Right) and children exist (TopRight + BottomRight):
+    ///   show all children, hide parent
+    /// - If current window is in a child zone (e.g. TopRight) and parent exists (Right):
+    ///   show parent, hide all children (siblings too)
+    /// - If same-zone stacking (multiple windows in exact same zone): cycle within zone
+    fn cycle_next(&self, current_window_id: &str) -> Option<(Vec<ZoneEntry>, Vec<String>)> {
+        let zone_id = self.find_zone(current_window_id)?;
+
+        // Check for parent-child group cycling first
+        // Case 1: Current is in a parent zone, children exist → show children, hide parent
+        let children = zone_id.side.covered_children();
+        if !children.is_empty() {
+            let mut child_entries = Vec::new();
+            for child_side in children {
+                let child_zone = ZoneId {
+                    monitor_idx: zone_id.monitor_idx,
+                    side: child_side.clone(),
+                };
+                if let Some(entries) = self.zones.get(&child_zone) {
+                    if let Some(entry) = entries.last() {
+                        child_entries.push(entry.clone());
+                    }
+                }
+            }
+            if !child_entries.is_empty() {
+                return Some((child_entries, vec![current_window_id.to_string()]));
+            }
+        }
+
+        // Case 2: Current is in a child zone, parent exists → show parent, hide all siblings
+        if let Some(parent_side) = zone_id.side.immediate_parent() {
+            let parent_zone = ZoneId {
+                monitor_idx: zone_id.monitor_idx,
+                side: parent_side.clone(),
+            };
+            if let Some(parent_entries) = self.zones.get(&parent_zone) {
+                if let Some(parent_entry) = parent_entries.last() {
+                    // Collect all sibling child window IDs to hide
+                    let mut to_hide = Vec::new();
+                    for child_side in parent_side.covered_children() {
+                        let child_zone = ZoneId {
+                            monitor_idx: zone_id.monitor_idx,
+                            side: child_side.clone(),
+                        };
+                        if let Some(entries) = self.zones.get(&child_zone) {
+                            for entry in entries {
+                                if !to_hide.contains(&entry.window_id) {
+                                    to_hide.push(entry.window_id.clone());
+                                }
+                            }
+                        }
+                    }
+                    return Some((vec![parent_entry.clone()], to_hide));
+                }
+            }
+        }
+
+        // Case 3: Same-zone stacking (multiple windows in exact same zone)
+        let entries = self.zones.get(zone_id)?;
+        if entries.len() < 2 {
+            return None;
+        }
+
+        let current_idx = entries.iter().position(|e| e.window_id == current_window_id)?;
+        let next_idx = (current_idx + 1) % entries.len();
+        let next = &entries[next_idx];
+
+        Some((
+            vec![next.clone()],
+            vec![current_window_id.to_string()],
+        ))
+    }
+
+    /// Remove stale entries for windows that no longer exist
+    fn cleanup_stale_windows(&mut self, existing_ids: &[String]) {
+        let mut empty_zones = Vec::new();
+        for (zone_id, entries) in self.zones.iter_mut() {
+            entries.retain(|e| existing_ids.contains(&e.window_id));
+            if entries.is_empty() {
+                empty_zones.push(zone_id.clone());
+            }
+        }
+        for zone_id in empty_zones {
+            self.zones.remove(&zone_id);
+        }
+    }
+
+    /// Collect all entries that should be surfaced when a zone is vacated.
+    /// Includes same-zone entries AND entries in child zones that were hidden.
+    fn collect_surface_entries(&self, zone_id: &ZoneId) -> Vec<ZoneEntry> {
+        let mut entries = Vec::new();
+
+        // Surface from the same zone
+        if let Some(zone_entries) = self.zones.get(zone_id) {
+            if let Some(entry) = zone_entries.last() {
+                entries.push(entry.clone());
+            }
+        }
+
+        // Surface from child zones (e.g. Right vacated → surface TopRight + BottomRight)
+        for child_side in zone_id.side.covered_children() {
+            let child_zone = ZoneId {
+                monitor_idx: zone_id.monitor_idx,
+                side: child_side.clone(),
+            };
+            if let Some(zone_entries) = self.zones.get(&child_zone) {
+                if let Some(entry) = zone_entries.last() {
+                    entries.push(entry.clone());
+                }
+            }
+        }
+
+        entries
+    }
+
+    /// Find any zone entry whose window is minimized (for fallback recovery).
+    /// Returns the last entry from the first zone where all windows are minimized.
+    fn find_minimized_entry(&self, windows: &[WindowInfo]) -> Option<ZoneEntry> {
+        let minimized_ids: Vec<&str> = windows
+            .iter()
+            .filter(|w| w.minimized)
+            .map(|w| w.id.as_str())
+            .collect();
+
+        // Find zones where at least one entry is minimized
+        for entries in self.zones.values() {
+            if let Some(entry) = entries.iter().rev().find(|e| minimized_ids.contains(&e.window_id.as_str())) {
+                return Some(entry.clone());
+            }
+        }
+        None
+    }
+
+    /// Remove a window and return (zone_id, entries to surface)
+    fn find_and_remove(&mut self, window_id: &str) -> Option<(ZoneId, Vec<ZoneEntry>)> {
+        let zone_id = self.find_zone(window_id)?.clone();
+        self.remove_window(window_id);
+        let surface = self.collect_surface_entries(&zone_id);
+        Some((zone_id, surface))
+    }
+}
+
 /// Tracks state for repeat-press detection and snap positions
 pub struct TilingState {
     /// Last action per window: (action_name, monitor_index, timestamp)
     last_action: Mutex<HashMap<String, (String, usize, Instant)>>,
     /// Original geometry before first snap/maximize/grow (for restore)
     pre_snap_geometry: Mutex<HashMap<String, Rect>>,
+    /// Zone tracker for tab zone system
+    zone_tracker: Mutex<ZoneTracker>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -22,6 +374,14 @@ pub enum SnapSide {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SnapVertical {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Direction {
+    Left,
+    Right,
     Up,
     Down,
 }
@@ -60,16 +420,16 @@ impl TilingState {
         Self {
             last_action: Mutex::new(HashMap::new()),
             pre_snap_geometry: Mutex::new(HashMap::new()),
+            zone_tracker: Mutex::new(ZoneTracker::new()),
         }
     }
 
-    /// Get the last action for a window, if it was recent (within 2 seconds)
+    /// Get the last action for a window.
+    /// Persists until explicitly cleared or overwritten by a new snap action.
     fn get_last_action(&self, window_id: &str) -> Option<(String, usize)> {
         let actions = self.last_action.lock().unwrap();
-        if let Some((action, monitor_idx, time)) = actions.get(window_id) {
-            if time.elapsed().as_secs() < 2 {
-                return Some((action.clone(), *monitor_idx));
-            }
+        if let Some((action, monitor_idx, _time)) = actions.get(window_id) {
+            return Some((action.clone(), *monitor_idx));
         }
         None
     }
@@ -102,6 +462,138 @@ impl TilingState {
     fn take_pre_snap_geometry(&self, window_id: &str) -> Option<Rect> {
         let mut geo = self.pre_snap_geometry.lock().unwrap();
         geo.remove(window_id)
+    }
+
+    /// Place a window in a zone. Returns (displaced window IDs to minimize, entries to surface from vacated zone).
+    fn zone_place(
+        &self,
+        monitor_idx: usize,
+        action: &str,
+        window_id: &str,
+        geometry: Rect,
+    ) -> (Vec<String>, Vec<ZoneEntry>) {
+        let side = match ZoneSide::from_action(action) {
+            Some(s) => s,
+            None => return (Vec::new(), Vec::new()),
+        };
+        let zone_id = ZoneId { monitor_idx, side };
+
+        // Find old zone before move (for auto-surface)
+        let old_zone = {
+            let tracker = self.zone_tracker.lock().unwrap();
+            tracker.find_zone(window_id).cloned()
+        };
+
+        let displaced = {
+            let mut tracker = self.zone_tracker.lock().unwrap();
+            tracker.place_window(zone_id.clone(), window_id, action, geometry)
+        };
+
+        // If window moved to a different zone, collect entries to surface
+        // (from old zone itself + any child zones it was covering)
+        let surface = if let Some(old_zone_id) = old_zone {
+            if old_zone_id != zone_id {
+                let tracker = self.zone_tracker.lock().unwrap();
+                let candidates = tracker.collect_surface_entries(&old_zone_id);
+                // Filter out: the window being placed, and windows that were just displaced.
+                // This prevents surfacing a window that the new zone covers, which would
+                // trigger overlapping-parent checks that minimize the just-placed window.
+                candidates
+                    .into_iter()
+                    .filter(|e| {
+                        e.window_id != window_id && !displaced.contains(&e.window_id)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        (displaced, surface)
+    }
+
+    /// Place a window in a zone silently (no displacement) — used for startup scan.
+    fn zone_place_silent(&self, monitor_idx: usize, action: &str, window_id: &str, geometry: Rect) {
+        let side = match ZoneSide::from_action(action) {
+            Some(s) => s,
+            None => return,
+        };
+        let zone_id = ZoneId { monitor_idx, side };
+        let mut tracker = self.zone_tracker.lock().unwrap();
+        tracker.place_window_silent(zone_id, window_id, action, geometry);
+    }
+
+    /// Remove a window from its zone.
+    fn zone_remove(&self, window_id: &str) {
+        let mut tracker = self.zone_tracker.lock().unwrap();
+        tracker.remove_window(window_id);
+    }
+
+    /// Cycle tab groups. Returns (entries to show, window IDs to hide).
+    fn zone_cycle(&self, current_window_id: &str) -> Option<(Vec<ZoneEntry>, Vec<String>)> {
+        let tracker = self.zone_tracker.lock().unwrap();
+        tracker.cycle_next(current_window_id)
+    }
+
+    /// Remove stale entries for closed windows.
+    fn zone_cleanup(&self, existing_ids: &[String]) {
+        let mut tracker = self.zone_tracker.lock().unwrap();
+        tracker.cleanup_stale_windows(existing_ids);
+    }
+
+    /// Remove a window from its zone and return entries to surface (if any).
+    fn zone_find_and_remove(&self, window_id: &str) -> Option<(ZoneId, Vec<ZoneEntry>)> {
+        let mut tracker = self.zone_tracker.lock().unwrap();
+        tracker.find_and_remove(window_id)
+    }
+
+    /// Find a minimized window in any zone (fallback for tab cycle recovery).
+    fn zone_find_minimized(&self, windows: &[WindowInfo]) -> Option<ZoneEntry> {
+        let tracker = self.zone_tracker.lock().unwrap();
+        tracker.find_minimized_entry(windows)
+    }
+
+    /// Get window IDs from zones that cover this window's zone (parents + children).
+    /// Used to minimize overlapping windows when a window is surfaced.
+    fn zone_get_overlapping(&self, window_id: &str) -> Vec<String> {
+        let tracker = self.zone_tracker.lock().unwrap();
+        let zone_id = match tracker.find_zone(window_id) {
+            Some(z) => z.clone(),
+            None => return Vec::new(),
+        };
+
+        let mut to_minimize = Vec::new();
+
+        // Check parent zones (e.g. surfacing TopRight should minimize Right)
+        for parent_side in zone_id.side.covering_parents() {
+            let parent_zone = ZoneId {
+                monitor_idx: zone_id.monitor_idx,
+                side: parent_side.clone(),
+            };
+            if let Some(entries) = tracker.zones.get(&parent_zone) {
+                for entry in entries {
+                    if entry.window_id != window_id && !to_minimize.contains(&entry.window_id) {
+                        to_minimize.push(entry.window_id.clone());
+                    }
+                }
+            }
+        }
+
+        to_minimize
+    }
+
+    /// Get the side context ("left" or "right") for a window from the zone tracker.
+    /// Used as a fallback when last_action has expired.
+    fn zone_side_context(&self, window_id: &str) -> Option<&'static str> {
+        let tracker = self.zone_tracker.lock().unwrap();
+        let zone_id = tracker.find_zone(window_id)?;
+        match &zone_id.side {
+            ZoneSide::Left | ZoneSide::TopLeft | ZoneSide::BottomLeft => Some("left"),
+            ZoneSide::Right | ZoneSide::TopRight | ZoneSide::BottomRight => Some("right"),
+            ZoneSide::Maximize => None,
+        }
     }
 }
 
@@ -396,6 +888,283 @@ fn next_monitor_index(
     current // All other monitors excluded, stay on current
 }
 
+/// Find the monitor to the left/right/above/below based on physical layout.
+/// Uses center-point proximity — finds the nearest monitor whose center
+/// is in the requested direction from the current monitor's center.
+fn find_monitor_in_direction(
+    current_idx: usize,
+    monitors: &[MonitorInfo],
+    excluded: &[String],
+    direction: Direction,
+) -> Option<usize> {
+    let cur = &monitors[current_idx];
+    let cx = cur.x + cur.width / 2;
+    let cy = cur.y + cur.height / 2;
+
+    monitors
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| *i != current_idx && !excluded.contains(&m.name))
+        .filter(|(_, m)| {
+            let mx = m.x + m.width / 2;
+            let my = m.y + m.height / 2;
+            let dx = (mx - cx).abs();
+            let dy = (my - cy).abs();
+            // Require dominant axis: Left/Right needs dx >= dy, Up/Down needs dy >= dx.
+            // This prevents stacked monitors being found via Left/Right (and vice versa).
+            match direction {
+                Direction::Left => mx < cx && dx >= dy,
+                Direction::Right => mx > cx && dx >= dy,
+                Direction::Up => my < cy && dy >= dx,
+                Direction::Down => my > cy && dy >= dx,
+            }
+        })
+        .min_by_key(|(_, m)| {
+            let mx = m.x + m.width / 2;
+            let my = m.y + m.height / 2;
+            (cx - mx).abs() + (cy - my).abs()
+        })
+        .map(|(i, _)| i)
+}
+
+/// Scan all windows on startup and populate the zone tracker + last_action
+/// based on geometry matching. This lets Pave "know" about existing tiled windows
+/// without requiring them to be re-snapped.
+pub async fn scan_existing_windows(
+    wm: &KWinBackend,
+    config: &PaveConfig,
+    state: &TilingState,
+) -> Result<(), String> {
+    let windows = wm.get_windows().await?;
+    let monitors = wm.get_monitors().await?;
+    if monitors.is_empty() {
+        return Ok(());
+    }
+
+    let gap = config.gap_size;
+    let mut matched = 0;
+
+    for window in &windows {
+        let mon_idx = find_window_monitor(window, &monitors);
+        let monitor = &monitors[mon_idx];
+        let wrect = window_to_rect(window);
+
+        // Build all candidate zones and their geometries for this monitor
+        let candidates: Vec<(&str, Rect)> = vec![
+            ("almost_maximize", almost_maximize_rect(monitor, gap)),
+            ("full_maximize", almost_maximize_rect(monitor, 1)),
+            ("snap_left", snap_left_rect(monitor, gap)),
+            ("snap_right", snap_right_rect(monitor, gap)),
+            ("snap_left_two_thirds", snap_left_two_thirds_rect(monitor, gap)),
+            ("snap_left_one_third", snap_left_one_third_rect(monitor, gap)),
+            ("snap_right_two_thirds", snap_right_two_thirds_rect(monitor, gap)),
+            ("snap_right_one_third", snap_right_one_third_rect(monitor, gap)),
+            ("snap_top_left", snap_top_left_rect(monitor, gap)),
+            ("snap_top_right", snap_top_right_rect(monitor, gap)),
+            ("snap_bottom_left", snap_bottom_left_rect(monitor, gap)),
+            ("snap_bottom_right", snap_bottom_right_rect(monitor, gap)),
+        ];
+
+        // Also check width-preserving quarters (current width + half height)
+        let half_h = monitor.height / 2;
+        let g = gap as i32;
+        let top_preserve = Rect {
+            x: wrect.x,
+            y: monitor.y + g,
+            width: wrect.width,
+            height: half_h - g - g / 2,
+        };
+        let bottom_preserve = Rect {
+            x: wrect.x,
+            y: monitor.y + half_h + g / 2,
+            width: wrect.width,
+            height: monitor.height - half_h - g - g / 2,
+        };
+
+        // Try standard zone geometries first
+        if let Some((action, rect)) = candidates.iter().find(|(_, r)| rects_approx_equal(&wrect, r)) {
+            log::info!(
+                "Startup scan: window '{}' ({}) matches zone {} on monitor {}",
+                window.title, if window.minimized { "minimized" } else { "visible" },
+                action, monitor.name
+            );
+            state.set_last_action(&window.id, action, mon_idx);
+            state.zone_place_silent(mon_idx, action, &window.id, *rect);
+            matched += 1;
+        } else if rects_approx_equal(&wrect, &top_preserve) {
+            // Width-preserving top quarter — determine side from x position
+            let action = if wrect.x < monitor.x + monitor.width / 2 {
+                "snap_top_left"
+            } else {
+                "snap_top_right"
+            };
+            log::info!(
+                "Startup scan: window '{}' ({}) matches {} (width-preserving) on monitor {}",
+                window.title, if window.minimized { "minimized" } else { "visible" },
+                action, monitor.name
+            );
+            state.set_last_action(&window.id, action, mon_idx);
+            state.zone_place_silent(mon_idx, action, &window.id, wrect);
+            matched += 1;
+        } else if rects_approx_equal(&wrect, &bottom_preserve) {
+            let action = if wrect.x < monitor.x + monitor.width / 2 {
+                "snap_bottom_left"
+            } else {
+                "snap_bottom_right"
+            };
+            log::info!(
+                "Startup scan: window '{}' ({}) matches {} (width-preserving) on monitor {}",
+                window.title, if window.minimized { "minimized" } else { "visible" },
+                action, monitor.name
+            );
+            state.set_last_action(&window.id, action, mon_idx);
+            state.zone_place_silent(mon_idx, action, &window.id, wrect);
+            matched += 1;
+        }
+    }
+
+    log::info!("Startup scan complete: {matched}/{} windows matched zones", windows.len());
+    Ok(())
+}
+
+/// After a snap/maximize, register the window in its zone.
+/// Immediately minimizes displaced windows and returns an entry to surface from a vacated zone.
+async fn auto_tab_after_snap(
+    wm: &KWinBackend,
+    config: &PaveConfig,
+    state: &TilingState,
+    window_id: &str,
+    action: &str,
+    monitor_idx: usize,
+    geometry: Rect,
+) -> Result<(), String> {
+    let (displaced, surface) = state.zone_place(monitor_idx, action, window_id, geometry);
+
+    for displaced_id in &displaced {
+        log::info!("Auto-tab: minimizing displaced window {displaced_id}");
+        if let Err(e) = wm.minimize_window(displaced_id).await {
+            log::error!("Failed to minimize displaced window: {e}");
+        }
+    }
+
+    if config.auto_surface_tabs {
+        for entry in &surface {
+            surface_zone_entry(wm, state, entry).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Surface a window from a vacated zone (unminimize + move to stored geometry).
+/// Also minimizes any windows in parent zones that would cover this window.
+async fn surface_zone_entry(
+    wm: &KWinBackend,
+    state: &TilingState,
+    entry: &ZoneEntry,
+) -> Result<(), String> {
+    log::info!("Auto-surface: restoring {} from vacated zone", entry.window_id);
+
+    // Minimize any parent zone windows that cover this window's zone
+    let overlapping = state.zone_get_overlapping(&entry.window_id);
+    for id in &overlapping {
+        log::info!("Auto-surface: minimizing overlapping parent window {id}");
+        if let Err(e) = wm.minimize_window(id).await {
+            log::error!("Failed to minimize overlapping window: {e}");
+        }
+    }
+
+    wm.unminimize_window(&entry.window_id).await?;
+    wm.move_window(
+        &entry.window_id,
+        entry.geometry.x,
+        entry.geometry.y,
+        entry.geometry.width,
+        entry.geometry.height,
+    )
+    .await?;
+    Ok(())
+}
+
+// --- Snap spectrum: bidirectional size cycling ---
+
+/// Ordered snap spectrum: leftmost to rightmost
+const SNAP_SPECTRUM: &[&str] = &[
+    "snap_left_one_third",    // 0
+    "snap_left",              // 1
+    "snap_left_two_thirds",   // 2
+    "almost_maximize",        // 3
+    "snap_right_two_thirds",  // 4
+    "snap_right",             // 5
+    "snap_right_one_third",   // 6
+];
+
+fn spectrum_index(action: &str) -> Option<usize> {
+    SNAP_SPECTRUM.iter().position(|&a| a == action)
+}
+
+fn spectrum_rect(index: usize, monitor: &MonitorInfo, gap: u32) -> Rect {
+    match SNAP_SPECTRUM[index] {
+        "snap_left_one_third" => snap_left_one_third_rect(monitor, gap),
+        "snap_left" => snap_left_rect(monitor, gap),
+        "snap_left_two_thirds" => snap_left_two_thirds_rect(monitor, gap),
+        "almost_maximize" => almost_maximize_rect(monitor, gap),
+        "snap_right_two_thirds" => snap_right_two_thirds_rect(monitor, gap),
+        "snap_right" => snap_right_rect(monitor, gap),
+        "snap_right_one_third" => snap_right_one_third_rect(monitor, gap),
+        _ => unreachable!(),
+    }
+}
+
+/// Determine current spectrum index from geometry match, then last_action fallback.
+fn find_current_spectrum_index(
+    current_rect: &Rect,
+    last_action_name: &Option<String>,
+    mon_idx: usize,
+    state: &TilingState,
+    window: &WindowInfo,
+    monitor: &MonitorInfo,
+    gap: u32,
+) -> Option<usize> {
+    // Try geometry match first
+    for (i, _) in SNAP_SPECTRUM.iter().enumerate() {
+        let rect = spectrum_rect(i, monitor, gap);
+        if rects_approx_equal(current_rect, &rect) {
+            return Some(i);
+        }
+    }
+
+    // Fall back to last_action (handles smart-space positions that don't match standard geometry)
+    let on_same_monitor = state
+        .get_last_action(&window.id)
+        .map(|(_, m)| m == mon_idx)
+        .unwrap_or(false);
+    if on_same_monitor {
+        if let Some(action) = last_action_name.as_deref() {
+            return spectrum_index(action);
+        }
+    }
+
+    None
+}
+
+/// Determine spectrum index for a quarter by matching x and width only (ignoring y/height).
+fn find_quarter_spectrum_index(
+    current_rect: &Rect,
+    monitor: &MonitorInfo,
+    gap: u32,
+) -> Option<usize> {
+    for i in 0..SNAP_SPECTRUM.len() {
+        let rect = spectrum_rect(i, monitor, gap);
+        if (current_rect.x - rect.x).abs() <= 15
+            && (current_rect.width - rect.width).abs() <= 15
+        {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// Handle the almost-maximize action
 pub async fn handle_maximize(
     wm: &KWinBackend,
@@ -444,18 +1213,21 @@ pub async fn handle_maximize(
         wm.move_window(&window.id, almost_rect.x, almost_rect.y, almost_rect.width, almost_rect.height)
             .await?;
         state.set_last_action(&window.id, "almost_maximize", mon_idx);
+        auto_tab_after_snap(wm, config, state, &window.id, "almost_maximize", mon_idx, almost_rect).await?;
     } else if was_full_maximized || rects_approx_equal(&current_rect, &full_rect) {
         // Full-size -> almost-maximize
         log::info!("Action: full-size to almost-maximize");
         wm.move_window(&window.id, almost_rect.x, almost_rect.y, almost_rect.width, almost_rect.height)
             .await?;
         state.set_last_action(&window.id, "almost_maximize", mon_idx);
+        auto_tab_after_snap(wm, config, state, &window.id, "almost_maximize", mon_idx, almost_rect).await?;
     } else if was_almost_maximized || rects_approx_equal(&current_rect, &almost_rect) {
         // Almost-maximized -> full-size (just geometry, no KWin maximize)
         log::info!("Action: almost-maximize to full-size");
         wm.move_window(&window.id, full_rect.x, full_rect.y, full_rect.width, full_rect.height)
             .await?;
         state.set_last_action(&window.id, "full_maximize", mon_idx);
+        auto_tab_after_snap(wm, config, state, &window.id, "full_maximize", mon_idx, full_rect).await?;
     } else {
         // Neither -> almost-maximize
         log::info!("Action: almost-maximize");
@@ -463,12 +1235,15 @@ pub async fn handle_maximize(
         wm.move_window(&window.id, almost_rect.x, almost_rect.y, almost_rect.width, almost_rect.height)
             .await?;
         state.set_last_action(&window.id, "almost_maximize", mon_idx);
+        auto_tab_after_snap(wm, config, state, &window.id, "almost_maximize", mon_idx, almost_rect).await?;
     }
 
     Ok(())
 }
 
-/// Handle snap left/right action
+/// Handle snap left/right action using the bidirectional snap spectrum.
+/// Left = step leftward through spectrum, Right = step rightward.
+/// At spectrum edges, crosses to adjacent monitor if one exists in that direction.
 pub async fn handle_snap(
     wm: &KWinBackend,
     config: &PaveConfig,
@@ -488,19 +1263,8 @@ pub async fn handle_snap(
     let windows = wm.get_windows().await?;
     let mon_idx = find_window_monitor(&window, &monitors);
     let monitor = &monitors[mon_idx];
-    let sorted = sort_monitors(&monitors);
-
-    let action_name = match side {
-        SnapSide::Left => "snap_left",
-        SnapSide::Right => "snap_right",
-    };
-
-    let standard_rect = match side {
-        SnapSide::Left => snap_left_rect(monitor, config.gap_size),
-        SnapSide::Right => snap_right_rect(monitor, config.gap_size),
-    };
-
     let current_rect = window_to_rect(&window);
+    let gap = config.gap_size;
 
     // If currently in a quarter, left/right escapes to full half snap on that side
     let last_action_name = state
@@ -508,117 +1272,168 @@ pub async fn handle_snap(
         .map(|(a, _)| a);
     let is_quarter = matches!(
         last_action_name.as_deref(),
-        Some("snap_top_left") | Some("snap_top_right") | Some("snap_bottom_left") | Some("snap_bottom_right")
+        Some("snap_top_left") | Some("snap_top_right")
+        | Some("snap_bottom_left") | Some("snap_bottom_right")
     );
 
     if is_quarter {
-        // Escape from quarter to full half snap on the pressed side
-        wm.move_window(
-            &window.id,
-            standard_rect.x,
-            standard_rect.y,
-            standard_rect.width,
-            standard_rect.height,
-        )
-        .await?;
-        state.set_last_action(&window.id, action_name, mon_idx);
-        return Ok(());
-    }
+        let is_top = matches!(
+            last_action_name.as_deref(),
+            Some("snap_top_left") | Some("snap_top_right")
+        );
 
-    // Build fraction rects for this side on the current monitor
-    let half_rect = standard_rect;
-    let two_thirds_rect = match side {
-        SnapSide::Left => snap_left_two_thirds_rect(monitor, config.gap_size),
-        SnapSide::Right => snap_right_two_thirds_rect(monitor, config.gap_size),
-    };
-    let one_third_rect = match side {
-        SnapSide::Left => snap_left_one_third_rect(monitor, config.gap_size),
-        SnapSide::Right => snap_right_one_third_rect(monitor, config.gap_size),
-    };
+        // Try to find current width in the spectrum
+        let quarter_idx = find_quarter_spectrum_index(&current_rect, monitor, gap)
+            .or_else(|| {
+                // Fallback: if geometry doesn't match, infer from action name side
+                let is_left_quarter = matches!(
+                    last_action_name.as_deref(),
+                    Some("snap_top_left") | Some("snap_bottom_left")
+                );
+                Some(if is_left_quarter { 1 } else { 5 }) // default to 1/2 width
+            });
 
-    // Detect current fraction by geometry match or last_action fallback
-    let current_fraction = if rects_approx_equal(&current_rect, &half_rect) {
-        Some("half")
-    } else if rects_approx_equal(&current_rect, &two_thirds_rect) {
-        Some("two_thirds")
-    } else if rects_approx_equal(&current_rect, &one_third_rect) {
-        Some("one_third")
-    } else {
-        // Fall back to last_action for smart-space positions
-        let on_same_monitor = state
-            .get_last_action(&window.id)
-            .map(|(_, m)| m == mon_idx)
-            .unwrap_or(false);
-        if on_same_monitor {
-            match last_action_name.as_deref() {
-                Some(a) if a == action_name => Some("half"),
-                Some(a) if a == &format!("{action_name}_two_thirds") => Some("two_thirds"),
-                Some(a) if a == &format!("{action_name}_one_third") => Some("one_third"),
-                _ => None,
-            }
-        } else {
-            None
-        }
-    };
+        if let Some(idx) = quarter_idx {
+            let new_idx_i32 = match side {
+                SnapSide::Right => idx as i32 + 1,
+                SnapSide::Left => idx as i32 - 1,
+            };
 
-    if let Some(fraction) = current_fraction {
-        // Cycle fractions: 1/2 → 2/3 → 1/3 → next monitor 1/2 → ...
-        let (target_rect, target_action, target_mon) = match fraction {
-            "half" => (two_thirds_rect, format!("{action_name}_two_thirds"), mon_idx),
-            "two_thirds" => (one_third_rect, format!("{action_name}_one_third"), mon_idx),
-            "one_third" | _ => {
-                // Try next monitor
-                let next_idx = next_monitor_index(mon_idx, &sorted, &config.excluded_monitors);
-                if next_idx != mon_idx {
-                    let next_monitor = &monitors[next_idx];
-                    let next_rect = match side {
-                        SnapSide::Left => snap_left_rect(next_monitor, config.gap_size),
-                        SnapSide::Right => snap_right_rect(next_monitor, config.gap_size),
+            if new_idx_i32 < 0 || new_idx_i32 >= SNAP_SPECTRUM.len() as i32 {
+                // Edge of spectrum — try monitor crossing (as quarter)
+                let direction = match side {
+                    SnapSide::Right => Direction::Right,
+                    SnapSide::Left => Direction::Left,
+                };
+                if let Some(next_mon_idx) = find_monitor_in_direction(
+                    mon_idx, &monitors, &config.excluded_monitors, direction,
+                ) {
+                    let entry_idx = match side {
+                        SnapSide::Right => 0,
+                        SnapSide::Left => SNAP_SPECTRUM.len() - 1,
                     };
-                    (next_rect, action_name.to_string(), next_idx)
-                } else {
-                    // Single monitor: wrap back to 1/2
-                    (half_rect, action_name.to_string(), mon_idx)
+                    let next_monitor = &monitors[next_mon_idx];
+                    let spectrum_r = spectrum_rect(entry_idx, next_monitor, gap);
+                    let g = gap as i32;
+                    let half_h = next_monitor.height / 2;
+                    let quarter_rect = if is_top {
+                        Rect { x: spectrum_r.x, y: next_monitor.y + g, width: spectrum_r.width, height: half_h - g - g / 2 }
+                    } else {
+                        Rect { x: spectrum_r.x, y: next_monitor.y + half_h + g / 2, width: spectrum_r.width, height: next_monitor.height - half_h - g - g / 2 }
+                    };
+                    let new_is_left = entry_idx < 3;
+                    let action = match (is_top, new_is_left) {
+                        (true, true) => "snap_top_left",
+                        (true, false) => "snap_top_right",
+                        (false, true) => "snap_bottom_left",
+                        (false, false) => "snap_bottom_right",
+                    };
+                    wm.move_window(&window.id, quarter_rect.x, quarter_rect.y, quarter_rect.width, quarter_rect.height).await?;
+                    state.set_last_action(&window.id, action, next_mon_idx);
+                    auto_tab_after_snap(wm, config, state, &window.id, action, next_mon_idx, quarter_rect).await?;
                 }
+                // else: no monitor in that direction, no-op
+            } else {
+                // Stay in quarter mode, adjust width
+                let new_idx = new_idx_i32 as usize;
+                let spectrum_r = spectrum_rect(new_idx, monitor, gap);
+                let g = gap as i32;
+                let half_h = monitor.height / 2;
+                let quarter_rect = if is_top {
+                    Rect { x: spectrum_r.x, y: monitor.y + g, width: spectrum_r.width, height: half_h - g - g / 2 }
+                } else {
+                    Rect { x: spectrum_r.x, y: monitor.y + half_h + g / 2, width: spectrum_r.width, height: monitor.height - half_h - g - g / 2 }
+                };
+                let new_is_left = new_idx < 3;
+                let action = match (is_top, new_is_left) {
+                    (true, true) => "snap_top_left",
+                    (true, false) => "snap_top_right",
+                    (false, true) => "snap_bottom_left",
+                    (false, false) => "snap_bottom_right",
+                };
+                wm.move_window(&window.id, quarter_rect.x, quarter_rect.y, quarter_rect.width, quarter_rect.height).await?;
+                state.set_last_action(&window.id, action, mon_idx);
+                auto_tab_after_snap(wm, config, state, &window.id, action, mon_idx, quarter_rect).await?;
             }
-        };
+        }
 
-        wm.move_window(
-            &window.id,
-            target_rect.x,
-            target_rect.y,
-            target_rect.width,
-            target_rect.height,
-        )
-        .await?;
-        state.set_last_action(&window.id, &target_action, target_mon);
         return Ok(());
     }
 
-    // Fresh snap — save pre-snap geometry, try smart space, default to 1/2
-    state.save_pre_snap_geometry(&window.id, current_rect);
+    // Try to find current position in spectrum
+    let current_index = find_current_spectrum_index(
+        &current_rect, &last_action_name, mon_idx, state, &window, monitor, gap,
+    );
 
-    if let Some(smart_rect) = find_empty_space(side, monitor, &windows, &window.id, config.gap_size) {
-        wm.move_window(
-            &window.id,
-            smart_rect.x,
-            smart_rect.y,
-            smart_rect.width,
-            smart_rect.height,
-        )
-        .await?;
-    } else {
-        wm.move_window(
-            &window.id,
-            standard_rect.x,
-            standard_rect.y,
-            standard_rect.width,
-            standard_rect.height,
-        )
-        .await?;
+    match current_index {
+        Some(idx) => {
+            // Step in the pressed direction
+            let new_idx = match side {
+                SnapSide::Right => idx as i32 + 1,
+                SnapSide::Left => idx as i32 - 1,
+            };
+
+            if new_idx >= 0 && new_idx < SNAP_SPECTRUM.len() as i32 {
+                // Move within current monitor
+                let new_idx = new_idx as usize;
+                let action = SNAP_SPECTRUM[new_idx];
+                let rect = spectrum_rect(new_idx, monitor, gap);
+                wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height).await?;
+                state.set_last_action(&window.id, action, mon_idx);
+                auto_tab_after_snap(wm, config, state, &window.id, action, mon_idx, rect).await?;
+            } else {
+                // Edge of spectrum — try crossing to adjacent monitor
+                let direction = match side {
+                    SnapSide::Right => Direction::Right,
+                    SnapSide::Left => Direction::Left,
+                };
+                if let Some(next_mon_idx) = find_monitor_in_direction(
+                    mon_idx, &monitors, &config.excluded_monitors, direction,
+                ) {
+                    // Enter the opposite end of the spectrum on the new monitor
+                    let entry_idx = match side {
+                        SnapSide::Right => 0,  // Enter at L1/3
+                        SnapSide::Left => SNAP_SPECTRUM.len() - 1,  // Enter at R1/3
+                    };
+                    let next_monitor = &monitors[next_mon_idx];
+                    let action = SNAP_SPECTRUM[entry_idx];
+                    let rect = spectrum_rect(entry_idx, next_monitor, gap);
+                    wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height).await?;
+                    state.set_last_action(&window.id, action, next_mon_idx);
+                    auto_tab_after_snap(wm, config, state, &window.id, action, next_mon_idx, rect).await?;
+                }
+                // else: no monitor in that direction, no-op
+            }
+        }
+        None => {
+            // Fresh snap — not currently in any spectrum position
+            state.save_pre_snap_geometry(&window.id, current_rect);
+
+            let action_name = match side {
+                SnapSide::Left => "snap_left",
+                SnapSide::Right => "snap_right",
+            };
+
+            // Try smart space first, fall back to standard half
+            let final_rect = if let Some(smart_rect) = find_empty_space(
+                side, monitor, &windows, &window.id, gap,
+            ) {
+                wm.move_window(&window.id, smart_rect.x, smart_rect.y, smart_rect.width, smart_rect.height).await?;
+                smart_rect
+            } else {
+                let rect = match side {
+                    SnapSide::Left => snap_left_rect(monitor, gap),
+                    SnapSide::Right => snap_right_rect(monitor, gap),
+                };
+                wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height).await?;
+                rect
+            };
+
+            state.set_last_action(&window.id, action_name, mon_idx);
+            auto_tab_after_snap(wm, config, state, &window.id, action_name, mon_idx, final_rect).await?;
+        }
     }
 
-    state.set_last_action(&window.id, action_name, mon_idx);
     Ok(())
 }
 
@@ -646,7 +1461,7 @@ pub async fn handle_snap_vertical(
         .get_last_action(&window.id)
         .map(|(a, _)| a);
 
-    // Determine side context from last action
+    // Determine side context from last action, falling back to zone tracker
     let side_context = last_action.as_deref().and_then(|a| {
         if a.starts_with("snap_left") || a.starts_with("snap_top_left") || a.starts_with("snap_bottom_left") {
             Some("left")
@@ -655,7 +1470,7 @@ pub async fn handle_snap_vertical(
         } else {
             None
         }
-    });
+    }).or_else(|| state.zone_side_context(&window.id));
 
     let side_context = match side_context {
         Some(s) => s,
@@ -665,11 +1480,86 @@ pub async fn handle_snap_vertical(
         }
     };
 
-    // Preserve current width and x — just split vertically
-    let g = config.gap_size as i32;
+    // Check if already in the target quarter — repeat press crosses monitors
+    let is_already_top = matches!(
+        last_action.as_deref(),
+        Some("snap_top_left") | Some("snap_top_right")
+    );
+    let is_already_bottom = matches!(
+        last_action.as_deref(),
+        Some("snap_bottom_left") | Some("snap_bottom_right")
+    );
+
+    if (direction == SnapVertical::Up && is_already_top)
+        || (direction == SnapVertical::Down && is_already_bottom)
+    {
+        let dir = match direction {
+            SnapVertical::Up => Direction::Up,
+            SnapVertical::Down => Direction::Down,
+        };
+        if let Some(next_mon_idx) = find_monitor_in_direction(
+            mon_idx, &monitors, &config.excluded_monitors, dir,
+        ) {
+            // Snap to the opposite vertical position on the new monitor
+            let next_monitor = &monitors[next_mon_idx];
+            let target_action = match (side_context, direction) {
+                ("left", SnapVertical::Up) => "snap_bottom_left",
+                ("left", SnapVertical::Down) => "snap_top_left",
+                ("right", SnapVertical::Up) => "snap_bottom_right",
+                ("right", SnapVertical::Down) => "snap_top_right",
+                _ => unreachable!(),
+            };
+            let target_rect = match target_action {
+                "snap_top_left" => snap_top_left_rect(next_monitor, config.gap_size),
+                "snap_top_right" => snap_top_right_rect(next_monitor, config.gap_size),
+                "snap_bottom_left" => snap_bottom_left_rect(next_monitor, config.gap_size),
+                "snap_bottom_right" => snap_bottom_right_rect(next_monitor, config.gap_size),
+                _ => unreachable!(),
+            };
+            wm.move_window(&window.id, target_rect.x, target_rect.y, target_rect.width, target_rect.height).await?;
+            state.set_last_action(&window.id, target_action, next_mon_idx);
+            auto_tab_after_snap(wm, config, state, &window.id, target_action, next_mon_idx, target_rect).await?;
+            return Ok(());
+        }
+        // No monitor in that direction — no-op
+        return Ok(());
+    }
+
+    let gap = config.gap_size;
+    let g = gap as i32;
     let current_rect = window_to_rect(&window);
     let half_h = monitor.height / 2;
 
+    // Quarter pressing opposite direction → go to full height first, preserving width
+    if (direction == SnapVertical::Down && is_already_top)
+        || (direction == SnapVertical::Up && is_already_bottom)
+    {
+        // Determine full-height action from horizontal spectrum position
+        let spectrum_idx = find_quarter_spectrum_index(&current_rect, monitor, gap);
+        let (target_action, target_rect) = if let Some(idx) = spectrum_idx {
+            (SNAP_SPECTRUM[idx], spectrum_rect(idx, monitor, gap))
+        } else {
+            // Fallback: standard half-width for the side
+            match side_context {
+                "left" => ("snap_left", snap_left_rect(monitor, gap)),
+                _ => ("snap_right", snap_right_rect(monitor, gap)),
+            }
+        };
+
+        log::info!(
+            "Snap vertical: {} -> {} (quarter to full height) at ({},{} {}x{})",
+            last_action.as_deref().unwrap_or("none"),
+            target_action,
+            target_rect.x, target_rect.y, target_rect.width, target_rect.height
+        );
+
+        wm.move_window(&window.id, target_rect.x, target_rect.y, target_rect.width, target_rect.height).await?;
+        state.set_last_action(&window.id, target_action, mon_idx);
+        auto_tab_after_snap(wm, config, state, &window.id, target_action, mon_idx, target_rect).await?;
+        return Ok(());
+    }
+
+    // Full height → quarter (preserve width and x)
     let target_rect = match direction {
         SnapVertical::Up => Rect {
             x: current_rect.x,
@@ -710,19 +1600,23 @@ pub async fn handle_snap_vertical(
     .await?;
 
     state.set_last_action(&window.id, target_action, mon_idx);
+    auto_tab_after_snap(wm, config, state, &window.id, target_action, mon_idx, target_rect).await?;
     Ok(())
 }
 
 /// Restore a window to its pre-snap geometry
 pub async fn handle_restore(
     wm: &KWinBackend,
-    _config: &PaveConfig,
+    config: &PaveConfig,
     state: &TilingState,
 ) -> Result<(), String> {
     let window = wm
         .get_active_window()
         .await?
         .ok_or("No active window")?;
+
+    // Remove from zone and surface next tabbed window if any
+    let zone_result = state.zone_find_and_remove(&window.id);
 
     let saved = state.take_pre_snap_geometry(&window.id);
     match saved {
@@ -734,6 +1628,17 @@ pub async fn handle_restore(
             wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height)
                 .await?;
             state.clear_last_action(&window.id);
+
+            // Surface tabbed windows in the zone (and child zones)
+            if let Some((_zone_id, entries)) = zone_result {
+                if config.auto_surface_tabs {
+                    for entry in &entries {
+                        log::info!("Restore: surfacing tabbed window {}", entry.window_id);
+                        surface_zone_entry(wm, state, entry).await?;
+                    }
+                }
+            }
+
             Ok(())
         }
         None => {
@@ -768,6 +1673,9 @@ pub async fn handle_grow_shrink(
     // Save original geometry before first grow/shrink
     state.save_pre_snap_geometry(&window.id, current_rect);
 
+    // Remove from zone — grow/shrink means the window is no longer in a snap position
+    state.zone_remove(&window.id);
+
     let scale = if grow { 1.1_f64 } else { 1.0 / 1.1 };
     let new_w = ((current_rect.width as f64) * scale).round() as i32;
     let new_h = ((current_rect.height as f64) * scale).round() as i32;
@@ -801,6 +1709,118 @@ pub async fn handle_grow_shrink(
     // No longer in a snap position
     state.clear_last_action(&window.id);
     Ok(())
+}
+
+/// Cycle to the next tabbed window group in the current zone.
+///
+/// Group cycling:
+/// - Full-side window (Right) ↔ both quarter windows (TopRight + BottomRight)
+/// - Same-zone stacking: cycles between individual windows
+pub async fn handle_tab_cycle(
+    wm: &KWinBackend,
+    _config: &PaveConfig,
+    state: &TilingState,
+) -> Result<(), String> {
+    let window = wm
+        .get_active_window()
+        .await?
+        .ok_or("No active window")?;
+
+    // Cleanup stale zone entries
+    let windows = wm.get_windows().await?;
+    let existing_ids: Vec<String> = windows.iter().map(|w| w.id.clone()).collect();
+    state.zone_cleanup(&existing_ids);
+
+    if let Some((to_show, to_hide)) = state.zone_cycle(&window.id) {
+        log::info!(
+            "Tab cycle: showing {} window(s), hiding {} window(s)",
+            to_show.len(), to_hide.len()
+        );
+
+        // Hide first, then show
+        for id in &to_hide {
+            if let Err(e) = wm.minimize_window(id).await {
+                log::error!("Tab cycle: failed to minimize {id}: {e}");
+            }
+        }
+
+        let monitors = wm.get_monitors().await?;
+        let mut last_shown_id = None;
+
+        for entry in &to_show {
+            wm.unminimize_window(&entry.window_id).await?;
+            wm.move_window(
+                &entry.window_id,
+                entry.geometry.x,
+                entry.geometry.y,
+                entry.geometry.width,
+                entry.geometry.height,
+            )
+            .await?;
+
+            // Set last_action for each shown window
+            let mon_idx = mon_idx_from_geometry(&entry.geometry, &monitors);
+            state.set_last_action(&entry.window_id, &entry.snap_action, mon_idx);
+            last_shown_id = Some(entry.window_id.clone());
+        }
+
+        // Activate the last shown window
+        if let Some(id) = last_shown_id {
+            wm.activate_window(&id).await?;
+        }
+    } else {
+        // Fallback: surface any minimized window from any zone
+        if let Some(entry) = state.zone_find_minimized(&windows) {
+            log::info!("Tab cycle fallback: surfacing minimized window {}", entry.window_id);
+
+            // Minimize parent zone windows that cover this window
+            let overlapping = state.zone_get_overlapping(&entry.window_id);
+            for id in &overlapping {
+                log::info!("Tab cycle: minimizing overlapping parent window {id}");
+                if let Err(e) = wm.minimize_window(id).await {
+                    log::error!("Failed to minimize overlapping window: {e}");
+                }
+            }
+
+            wm.unminimize_window(&entry.window_id).await?;
+            wm.move_window(
+                &entry.window_id,
+                entry.geometry.x,
+                entry.geometry.y,
+                entry.geometry.width,
+                entry.geometry.height,
+            )
+            .await?;
+            wm.activate_window(&entry.window_id).await?;
+
+            let monitors = wm.get_monitors().await?;
+            let mon_idx = mon_idx_from_geometry(&entry.geometry, &monitors);
+            state.set_last_action(&entry.window_id, &entry.snap_action, mon_idx);
+        } else {
+            log::debug!("Tab cycle: no windows to cycle or surface");
+        }
+    }
+
+    Ok(())
+}
+
+/// Helper to find monitor index from a geometry rect
+fn mon_idx_from_geometry(geometry: &Rect, monitors: &[MonitorInfo]) -> usize {
+    let fake_win = WindowInfo {
+        id: String::new(),
+        title: String::new(),
+        x: geometry.x,
+        y: geometry.y,
+        width: geometry.width,
+        height: geometry.height,
+        maximized: false,
+        minimized: false,
+        resource_class: String::new(),
+        active: false,
+        desktop: -1,
+        screen: String::new(),
+    };
+    find_window_monitor(&fake_win, monitors)
 }
 
 /// Move all non-minimized windows from the active window's monitor to the next monitor

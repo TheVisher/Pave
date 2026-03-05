@@ -211,6 +211,15 @@ pub fn run() {
                     }
                 }
 
+                // Scan existing windows to populate zone tracker + last_action
+                if let Err(e) = tiling::scan_existing_windows(
+                    backend_arc.as_ref(),
+                    &config,
+                    &tiling_state_arc,
+                ).await {
+                    log::error!("Startup window scan failed: {e}");
+                }
+
                 // Session Ghost: restore last session on startup if enabled
                 if config.restore_session {
                     let cfg = config_arc.read().await;
@@ -323,6 +332,14 @@ pub fn run() {
                                                 &cfg,
                                                 &ts,
                                                 false,
+                                            )
+                                            .await
+                                        }
+                                        "pave_tab_cycle" => {
+                                            tiling::handle_tab_cycle(
+                                                wm.as_ref(),
+                                                &cfg,
+                                                &ts,
                                             )
                                             .await
                                         }

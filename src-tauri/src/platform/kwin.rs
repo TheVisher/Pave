@@ -313,7 +313,7 @@ impl KWinBackend {
             }
         }
 
-        let clear_shortcuts = ["PaveAlmostMaximize", "PaveSnapLeft", "PaveSnapRight", "PaveSnapUp", "PaveSnapDown", "PaveRestoreWindow", "PaveGrowWindow", "PaveShrinkWindow"];
+        let clear_shortcuts = ["PaveAlmostMaximize", "PaveSnapLeft", "PaveSnapRight", "PaveSnapUp", "PaveSnapDown", "PaveRestoreWindow", "PaveGrowWindow", "PaveShrinkWindow", "PaveTabCycle"];
         for name in clear_shortcuts {
             let action_id: Vec<&str> = vec!["kwin", name, "KWin", ""];
             let empty_keys: Vec<i32> = vec![];
@@ -326,7 +326,7 @@ impl KWinBackend {
         // Ctrl+Alt+Return = 0x04000000 | 0x08000000 | 0x01000004
         // Ctrl+Alt+Left   = 0x04000000 | 0x08000000 | 0x01000012
         // Ctrl+Alt+Right  = 0x04000000 | 0x08000000 | 0x01000014
-        let shortcuts: [(&str, &str, i32); 8] = [
+        let shortcuts: [(&str, &str, i32); 9] = [
             ("AlmostMaximize", "Almost Maximize Window", 0x0D000004),
             ("SnapLeft", "Snap Window Left with Gap", 0x0D000012),
             ("SnapRight", "Snap Window Right with Gap", 0x0D000014),
@@ -335,6 +335,7 @@ impl KWinBackend {
             ("RestoreWindow", "Restore Window to Pre-Snap Size", 0x0C00005A),
             ("GrowWindow", "Grow Window by 10%", 0x0C00003D),
             ("ShrinkWindow", "Shrink Window by 10%", 0x0C00002D),
+            ("TabCycle", "Cycle Tabbed Windows in Zone", 0x0D000001),
         ];
         for (name, friendly, key) in shortcuts {
             let action_id: Vec<&str> = vec!["kwin", name, "KWin", friendly];
@@ -407,7 +408,7 @@ impl KWinBackend {
             )
             .await?;
 
-        let fresh_shortcuts = ["SnapUp", "SnapDown", "RestoreWindow", "GrowWindow", "ShrinkWindow"];
+        let fresh_shortcuts = ["SnapUp", "SnapDown", "RestoreWindow", "GrowWindow", "ShrinkWindow", "TabCycle"];
         for name in fresh_shortcuts {
             // Check if current key is 0 (unassigned) and if so, unregister
             let action_id: Vec<&str> = vec!["kwin", name, "KWin", ""];
@@ -506,7 +507,7 @@ impl KWinBackend {
             var screens = workspace.screens;
             for (var i = 0; i < screens.length; i++) {
                 var s = screens[i];
-                var geom = s.geometry;
+                var geom = workspace.clientArea(KWin.PlacementArea, s, workspace.currentDesktop);
                 result.push({
                     name: s.name,
                     x: Math.round(geom.x),
@@ -665,6 +666,69 @@ impl KWinBackend {
         let _: Result<(), _> = kwin_proxy.call("reconfigure", &()).await;
 
         log::info!("Applied corner radius: {radius}px");
+        Ok(())
+    }
+
+    pub async fn minimize_window(&self, window_id: &str) -> Result<(), String> {
+        log::info!("minimize_window: id={window_id}");
+        let script = format!(
+            r#"
+            var clients = workspace.stackingOrder;
+            for (var i = 0; i < clients.length; i++) {{
+                var c = clients[i];
+                if (c.internalId.toString() === "{window_id}") {{
+                    c.minimized = true;
+                    return "minimized";
+                }}
+            }}
+            return "not_found";
+            "#
+        );
+
+        let result = self.run_kwin_script_with_output(&script).await?;
+        log::info!("minimize_window result: {result}");
+        Ok(())
+    }
+
+    pub async fn unminimize_window(&self, window_id: &str) -> Result<(), String> {
+        log::info!("unminimize_window: id={window_id}");
+        let script = format!(
+            r#"
+            var clients = workspace.stackingOrder;
+            for (var i = 0; i < clients.length; i++) {{
+                var c = clients[i];
+                if (c.internalId.toString() === "{window_id}") {{
+                    c.minimized = false;
+                    return "unminimized";
+                }}
+            }}
+            return "not_found";
+            "#
+        );
+
+        let result = self.run_kwin_script_with_output(&script).await?;
+        log::info!("unminimize_window result: {result}");
+        Ok(())
+    }
+
+    pub async fn activate_window(&self, window_id: &str) -> Result<(), String> {
+        log::info!("activate_window: id={window_id}");
+        let script = format!(
+            r#"
+            var clients = workspace.stackingOrder;
+            for (var i = 0; i < clients.length; i++) {{
+                var c = clients[i];
+                if (c.internalId.toString() === "{window_id}") {{
+                    workspace.activeWindow = c;
+                    return "activated";
+                }}
+            }}
+            return "not_found";
+            "#
+        );
+
+        let result = self.run_kwin_script_with_output(&script).await?;
+        log::info!("activate_window result: {result}");
         Ok(())
     }
 

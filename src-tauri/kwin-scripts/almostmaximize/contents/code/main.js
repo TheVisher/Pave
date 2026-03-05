@@ -84,6 +84,16 @@ registerShortcut(
     }
 );
 
+registerShortcut(
+    "TabCycle",
+    "Cycle Tabbed Windows in Zone",
+    "Ctrl+Alt+Tab",
+    function() {
+        callDBus("com.pave.app", "/com/pave/Shortcuts",
+                 "com.pave.Shortcuts", "ShortcutPressed", "pave_tab_cycle");
+    }
+);
+
 // --- Resize tracking ---
 // Track pre-resize geometry so we can detect which edge moved and notify Pave.
 
