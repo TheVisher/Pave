@@ -315,10 +315,8 @@ impl KWinBackend {
     }
 
     /// Ensure key bindings are set in kglobalaccel.
-    /// Uses the original AlmostMaximize/SnapLeft/SnapRight shortcut names
-    /// since those already have working Wayland key grabs from the installed
-    /// KWin script at ~/.local/share/kwin/scripts/almostmaximize/.
-    /// Also clears any conflicting Pave* shortcuts.
+    /// Dynamically discovers and clears ANY component that currently holds
+    /// a key we need, then force-sets the bindings for Pave's shortcuts.
     async fn ensure_shortcut_keys(&self) -> Result<(), String> {
         let kga_proxy = self
             .build_proxy(
@@ -328,34 +326,6 @@ impl KWinBackend {
             )
             .await?;
 
-        // Clear conflicting Pave* shortcuts (from the disabled pave_shortcuts script)
-        // Clear shortcuts from other components that conflict with our key bindings
-        // (cider-linux used Ctrl+Alt+Up/Down for TileTop/TileBottom)
-        let conflict_components = ["kwin", "cider-linux"];
-        let conflict_names = ["TileTop", "TileBottom"];
-        for component in conflict_components {
-            for name in conflict_names {
-                let action_id: Vec<&str> = vec![component, name, "", ""];
-                let empty_keys: Vec<i32> = vec![];
-                let _: Result<Vec<i32>, _> = kga_proxy
-                    .call("setShortcut", &(&action_id, &empty_keys, 0u32))
-                    .await;
-            }
-        }
-
-        let clear_shortcuts = ["PaveAlmostMaximize", "PaveSnapLeft", "PaveSnapRight", "PaveSnapUp", "PaveSnapDown", "PaveRestoreWindow", "PaveGrowWindow", "PaveShrinkWindow", "PaveTabCycle"];
-        for name in clear_shortcuts {
-            let action_id: Vec<&str> = vec!["kwin", name, "KWin", ""];
-            let empty_keys: Vec<i32> = vec![];
-            let _: Result<Vec<i32>, _> = kga_proxy
-                .call("setShortcut", &(&action_id, &empty_keys, 0u32))
-                .await;
-        }
-
-        // Set the actual shortcuts
-        // Ctrl+Alt+Return = 0x04000000 | 0x08000000 | 0x01000004
-        // Ctrl+Alt+Left   = 0x04000000 | 0x08000000 | 0x01000012
-        // Ctrl+Alt+Right  = 0x04000000 | 0x08000000 | 0x01000014
         let shortcuts: [(&str, &str, i32); 9] = [
             ("AlmostMaximize", "Almost Maximize Window", 0x0D000004),
             ("SnapLeft", "Snap Window Left with Gap", 0x0D000012),
@@ -367,18 +337,54 @@ impl KWinBackend {
             ("ShrinkWindow", "Shrink Window by 10%", 0x0C00002D),
             ("TabCycle", "Cycle Tabbed Windows in Zone", 0x0D000001),
         ];
-        for (name, friendly, key) in shortcuts {
-            let action_id: Vec<&str> = vec!["kwin", name, "KWin", friendly];
-            let keys: Vec<i32> = vec![key];
 
-            // Best-effort: registerShortcut in the KWin script usually handles this,
-            // but setShortcut ensures the binding if it wasn't set by the script
-            let result: Result<Vec<i32>, _> = kga_proxy
-                .call("setShortcut", &(&action_id, &keys, 0u32))
+        // Phase 1: For each key we want, check if another component owns it.
+        // If so, clear that binding — regardless of what app it belongs to.
+        // This handles KDE built-in Tile*, cider-linux, or any future conflicts.
+        for (name, _, key) in &shortcuts {
+            let owner: Result<Vec<String>, _> = kga_proxy
+                .call("action", &(*key,))
+                .await;
+            if let Ok(action_id) = owner {
+                // action_id = [component, action_name, friendly_component, friendly_name]
+                if action_id.len() >= 2 && !action_id[0].is_empty() {
+                    let is_ours = action_id[0] == "kwin" && action_id[1] == *name;
+                    if !is_ours {
+                        log::info!(
+                            "Key {key:#x} ({name}) owned by {}/{} — clearing",
+                            action_id[0], action_id[1]
+                        );
+                        let owner_id: Vec<&str> = action_id.iter().map(|s| s.as_str()).collect();
+                        let empty_keys: Vec<i32> = vec![];
+                        let _: Result<(), _> = kga_proxy
+                            .call("setForeignShortcut", &(&owner_id, &empty_keys))
+                            .await;
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Clear legacy Pave* shortcuts (old naming scheme)
+        let legacy = ["PaveAlmostMaximize", "PaveSnapLeft", "PaveSnapRight", "PaveSnapUp", "PaveSnapDown", "PaveRestoreWindow", "PaveGrowWindow", "PaveShrinkWindow", "PaveTabCycle"];
+        for name in legacy {
+            let action_id: Vec<&str> = vec!["kwin", name, "KWin", ""];
+            let empty_keys: Vec<i32> = vec![];
+            let _: Result<(), _> = kga_proxy
+                .call("setForeignShortcut", &(&action_id, &empty_keys))
+                .await;
+        }
+
+        // Phase 3: Force-set Pave's shortcuts
+        for (name, friendly, key) in &shortcuts {
+            let action_id: Vec<&str> = vec!["kwin", name, "KWin", friendly];
+            let keys: Vec<i32> = vec![*key];
+
+            let result: Result<(), _> = kga_proxy
+                .call("setForeignShortcut", &(&action_id, &keys))
                 .await;
             match result {
-                Ok(actual) => log::info!("setShortcut for {name}: key={key:#x}, result={actual:?}"),
-                Err(e) => log::warn!("setShortcut for {name} failed: {e}"),
+                Ok(()) => log::info!("setForeignShortcut for {name}: key={key:#x}"),
+                Err(e) => log::warn!("setForeignShortcut for {name} failed: {e}"),
             }
         }
 
@@ -438,35 +444,78 @@ impl KWinBackend {
             )
             .await?;
 
-        let fresh_shortcuts = ["SnapUp", "SnapDown", "RestoreWindow", "GrowWindow", "ShrinkWindow", "TabCycle"];
-        for name in fresh_shortcuts {
-            // Check if current key is 0 (unassigned) and if so, unregister
-            let action_id: Vec<&str> = vec!["kwin", name, "KWin", ""];
-            let current: Result<Vec<i32>, _> = kga_proxy
-                .call("shortcut", &(&action_id,))
+        // Unconditionally unregister all Pave shortcuts so registerShortcut()
+        // in the KWin script creates them fresh with proper default keys.
+        let all_shortcuts = [
+            "AlmostMaximize", "SnapLeft", "SnapRight",
+            "SnapUp", "SnapDown", "RestoreWindow", "GrowWindow", "ShrinkWindow", "TabCycle",
+        ];
+        for name in all_shortcuts {
+            let result: Result<bool, _> = kga_proxy
+                .call("unregister", &("kwin", name))
                 .await;
-            if let Ok(keys) = current {
-                if keys.is_empty() || keys.iter().all(|k| *k == 0) {
-                    let _: Result<bool, _> = kga_proxy
-                        .call("unregister", &("kwin", name))
-                        .await;
-                    log::info!("Unregistered stale {name} (had key=0)");
-                }
+            log::info!("Unregistered {name}: {:?}", result);
+        }
+
+        // Pre-write shortcut keys into kglobalshortcutsrc BEFORE loading the KWin
+        // script. On Wayland, KWin's registerShortcut() reads existing key bindings
+        // from the config file. If we write them there first, registerShortcut()
+        // will pick them up and create proper Wayland key grabs.
+        // setForeignShortcut D-Bus calls don't work for keys that conflict with
+        // KWin's built-in tiling on some setups.
+        let shortcut_entries: &[(&str, &str, &str)] = &[
+            ("AlmostMaximize", "Ctrl+Alt+Return", "Almost Maximize Window"),
+            ("SnapLeft", "Ctrl+Alt+Left", "Snap Window Left with Gap"),
+            ("SnapRight", "Ctrl+Alt+Right", "Snap Window Right with Gap"),
+            ("SnapUp", "Ctrl+Alt+Up", "Snap Window Up (Quarter)"),
+            ("SnapDown", "Ctrl+Alt+Down", "Snap Window Down (Quarter)"),
+            ("RestoreWindow", "Ctrl+Alt+Z", "Restore Window to Pre-Snap Size"),
+            ("GrowWindow", "Ctrl+Alt+=", "Grow Window by 10%"),
+            ("ShrinkWindow", "Ctrl+Alt+-", "Shrink Window by 10%"),
+            ("TabCycle", "Ctrl+Alt+Tab", "Cycle Tabbed Windows in Zone"),
+        ];
+        for (name, key, friendly) in shortcut_entries {
+            let value = format!("{key},none,{friendly}");
+            let status = std::process::Command::new("kwriteconfig6")
+                .args([
+                    "--file", "kglobalshortcutsrc",
+                    "--group", "kwin",
+                    "--key", name,
+                    &value,
+                ])
+                .status();
+            match status {
+                Ok(s) if s.success() => log::info!("Pre-wrote shortcut {name}={key}"),
+                Ok(s) => log::warn!("kwriteconfig6 for {name} exited {s}"),
+                Err(e) => log::warn!("kwriteconfig6 for {name} failed: {e}"),
             }
         }
 
-        // Load the KWin script first — registerShortcut() creates the shortcut
-        // entries in kglobalaccel. Only then can we assign key bindings.
+        // Clear KDE built-in Tile shortcuts from config to prevent conflicts
+        let kde_tile_conflicts = [
+            "TileLeft", "TileRight", "TileMaximize", "TileAlmostMaximize",
+            "TileGrow", "TileGrowShift", "TileShrink", "TileShrinkShift", "TileRestore",
+        ];
+        for name in kde_tile_conflicts {
+            let _ = std::process::Command::new("kwriteconfig6")
+                .args([
+                    "--file", "kglobalshortcutsrc",
+                    "--group", "kwin",
+                    "--key", name,
+                    "--delete",
+                ])
+                .status();
+        }
+
+        // Load the KWin script — registerShortcut() will read the keys we just wrote.
         let scripting_proxy = self
             .build_proxy("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting")
             .await?;
 
-        // Unload any previous instance
         let _: Result<bool, _> = scripting_proxy
             .call("unloadScript", &("almostmaximize",))
             .await;
 
-        // Load from installed location
         let script_path = format!(
             "{}/.local/share/kwin/scripts/almostmaximize/contents/code/main.js",
             std::env::var("HOME").unwrap_or_default()
@@ -492,7 +541,7 @@ impl KWinBackend {
         // Give KWin time to process the registerShortcut calls
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        // Now assign key bindings (shortcuts exist in kglobalaccel at this point)
+        // Also try D-Bus assignment as a fallback
         self.ensure_shortcut_keys().await?;
 
         Ok(())
