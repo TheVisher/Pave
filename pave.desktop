@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Pave
+Comment=Smart window tiling manager for KDE/KWin
+Exec=pave
+Icon=pave
+Terminal=false
+Type=Application
+Categories=Utility;
+StartupWMClass=pave
