@@ -12,6 +12,8 @@ use crate::tiling;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+const LOCALHOST_PORT: u16 = 9527;
+
 fn show_settings(app: &AppHandle) {
     // If window already exists, just focus it
     if let Some(window) = app.get_webview_window("settings") {
@@ -19,8 +21,10 @@ fn show_settings(app: &AppHandle) {
         return;
     }
 
-    // Create a new settings window on demand (avoids Wayland hide/show crash)
-    match WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
+    // Create a new settings window on demand using localhost server
+    // (tauri://localhost custom protocol doesn't work on all WebKitGTK setups)
+    let url = format!("http://localhost:{LOCALHOST_PORT}/index.html").parse().unwrap();
+    match WebviewWindowBuilder::new(app, "settings", WebviewUrl::External(url))
         .title("Pave Settings")
         .inner_size(600.0, 700.0)
         .resizable(false)

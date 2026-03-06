@@ -149,7 +149,10 @@ pub fn run() {
     // This prevents D-Bus name conflicts that break shortcut registration.
     kill_stale_processes();
 
+    let port: u16 = 9527;
+
     tauri::Builder::default()
+        .plugin(tauri_plugin_localhost::Builder::new(port).build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -166,7 +169,7 @@ pub fn run() {
             throw_to_monitor,
             resurface_zones
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
 
             // Initialize backend and state in async context
@@ -235,10 +238,11 @@ pub fn run() {
 
                 // Show settings window on first run
                 if first_run {
+                    let url = format!("http://localhost:{port}/index.html").parse().unwrap();
                     if let Err(e) = tauri::WebviewWindowBuilder::new(
                         &handle2,
                         "settings",
-                        tauri::WebviewUrl::App("index.html".into()),
+                        tauri::WebviewUrl::External(url),
                     )
                     .title("Pave Settings")
                     .inner_size(600.0, 700.0)
