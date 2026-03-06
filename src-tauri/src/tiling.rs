@@ -78,16 +78,16 @@ impl ZoneSide {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ZoneId {
+pub struct ZoneId {
     monitor_idx: usize,
     side: ZoneSide,
 }
 
 #[derive(Debug, Clone)]
-struct ZoneEntry {
-    window_id: String,
-    snap_action: String,
-    geometry: Rect,
+pub struct ZoneEntry {
+    pub window_id: String,
+    pub snap_action: String,
+    pub geometry: Rect,
 }
 
 struct ZoneTracker {
@@ -375,6 +375,13 @@ impl ZoneTracker {
         None
     }
 
+    /// Get the top (most recent) entry from every occupied zone.
+    fn get_all_zone_tops(&self) -> Vec<ZoneEntry> {
+        self.zones.values()
+            .filter_map(|entries| entries.last().cloned())
+            .collect()
+    }
+
     /// Remove a window and return (zone_id, entries to surface)
     fn find_and_remove(&mut self, window_id: &str) -> Option<(ZoneId, Vec<ZoneEntry>)> {
         let zone_id = self.find_zone(window_id)?.clone();
@@ -470,7 +477,7 @@ impl TilingState {
         );
     }
 
-    fn clear_last_action(&self, window_id: &str) {
+    pub fn clear_last_action(&self, window_id: &str) {
         let mut actions = self.last_action.lock().unwrap();
         actions.remove(window_id);
     }
@@ -572,7 +579,7 @@ impl TilingState {
     }
 
     /// Remove a window from its zone and return entries to surface (if any).
-    fn zone_find_and_remove(&self, window_id: &str) -> Option<(ZoneId, Vec<ZoneEntry>)> {
+    pub fn zone_find_and_remove(&self, window_id: &str) -> Option<(ZoneId, Vec<ZoneEntry>)> {
         let mut tracker = self.zone_tracker.lock().unwrap();
         tracker.find_and_remove(window_id)
     }
@@ -622,6 +629,12 @@ impl TilingState {
             ZoneSide::Right | ZoneSide::TopRight | ZoneSide::BottomRight => Some("right"),
             ZoneSide::Maximize => None,
         }
+    }
+
+    /// Get the top entry from every occupied zone (for resurface).
+    pub fn zone_get_all_tops(&self) -> Vec<ZoneEntry> {
+        let tracker = self.zone_tracker.lock().unwrap();
+        tracker.get_all_zone_tops()
     }
 }
 
@@ -1086,7 +1099,7 @@ async fn auto_tab_after_snap(
 
 /// Surface a window from a vacated zone (unminimize + move to stored geometry).
 /// Also minimizes any windows in parent zones that would cover this window.
-async fn surface_zone_entry(
+pub async fn surface_zone_entry(
     wm: &KWinBackend,
     state: &TilingState,
     entry: &ZoneEntry,
@@ -1111,6 +1124,32 @@ async fn surface_zone_entry(
         entry.geometry.height,
     )
     .await?;
+    Ok(())
+}
+
+/// Resurface the top window in every occupied zone.
+/// Unminimizes and repositions each zone's most recent window.
+pub async fn resurface_all_zones(
+    wm: &KWinBackend,
+    state: &TilingState,
+) -> Result<(), String> {
+    let tops = state.zone_get_all_tops();
+    log::info!("Resurfacing {} zone(s)", tops.len());
+    for entry in &tops {
+        if let Err(e) = wm.unminimize_window(&entry.window_id).await {
+            log::error!("Resurface: failed to unminimize {}: {e}", entry.window_id);
+            continue;
+        }
+        if let Err(e) = wm.move_window(
+            &entry.window_id,
+            entry.geometry.x,
+            entry.geometry.y,
+            entry.geometry.width,
+            entry.geometry.height,
+        ).await {
+            log::error!("Resurface: failed to move {}: {e}", entry.window_id);
+        }
+    }
     Ok(())
 }
 

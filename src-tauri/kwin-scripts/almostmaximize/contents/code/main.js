@@ -159,3 +159,11 @@ for (var i = 0; i < clients.length; i++) {
 workspace.windowAdded.connect(function(client) {
     connectResizeSignals(client);
 });
+
+// Notify Pave when a window is removed (closed)
+workspace.windowRemoved.connect(function(client) {
+    if (!client || !client.normalWindow) return;
+    callDBus("com.pave.app", "/com/pave/WindowEvents",
+             "com.pave.WindowEvents", "WindowRemoved",
+             client.internalId.toString());
+});

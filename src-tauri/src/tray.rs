@@ -58,6 +58,8 @@ fn build_tray_menu(app: &AppHandle, config: &PaveConfig) -> Result<tauri::menu::
 
     let throw_item = MenuItemBuilder::with_id("throw_monitor", "Throw to Next Monitor")
         .build(app)?;
+    let resurface_item = MenuItemBuilder::with_id("resurface_zones", "Resurface Zones")
+        .build(app)?;
 
     let separator_throw = PredefinedMenuItem::separator(app)?;
 
@@ -71,6 +73,7 @@ fn build_tray_menu(app: &AppHandle, config: &PaveConfig) -> Result<tauri::menu::
         .item(&down_label)
         .item(&separator2)
         .item(&throw_item)
+        .item(&resurface_item)
         .item(&separator_throw);
 
     // Add preset items (filter out internal __last_session__)
@@ -153,6 +156,9 @@ pub fn setup_tray(
                             log::error!("Throw to monitor failed: {e}");
                         }
                     });
+                }
+                "resurface_zones" => {
+                    let _ = preset_tx.send("__resurface__".to_string());
                 }
                 _ if id.starts_with("preset_") => {
                     let name = id.strip_prefix("preset_").unwrap_or("");

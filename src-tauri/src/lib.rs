@@ -106,6 +106,11 @@ async fn throw_to_monitor(state: tauri::State<'_, AppState>) -> Result<(), Strin
     tiling::throw_to_next_monitor(state.backend.as_ref(), &cfg).await
 }
 
+#[tauri::command]
+async fn resurface_zones(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    tiling::resurface_all_zones(state.backend.as_ref(), &state.tiling_state).await
+}
+
 /// Kill any stale Pave processes left from a previous run.
 fn kill_stale_processes() {
     let my_pid = std::process::id();
@@ -158,7 +163,8 @@ pub fn run() {
             capture_preset,
             activate_preset,
             delete_preset,
-            throw_to_monitor
+            throw_to_monitor,
+            resurface_zones
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -166,7 +172,7 @@ pub fn run() {
             // Initialize backend and state in async context
             let handle2 = handle.clone();
             tauri::async_runtime::spawn(async move {
-                let (backend, mut shortcut_rx, mut resize_rx, mut preset_rx) =
+                let (backend, mut shortcut_rx, mut resize_rx, mut preset_rx, mut window_event_rx) =
                     match KWinBackend::new().await {
                     Ok(b) => b,
                     Err(e) => {
@@ -271,11 +277,16 @@ pub fn run() {
                     source: &str,
                     backend: &KWinBackend,
                     config_arc: &Arc<RwLock<PaveConfig>>,
+                    tiling_state: &Arc<tiling::TilingState>,
                 ) {
                     if name == "__throw__" {
                         let cfg = config_arc.read().await.clone();
                         if let Err(e) = tiling::throw_to_next_monitor(backend, &cfg).await {
                             log::error!("Throw to monitor failed: {e}");
+                        }
+                    } else if name == "__resurface__" {
+                        if let Err(e) = tiling::resurface_all_zones(backend, tiling_state).await {
+                            log::error!("Resurface zones failed: {e}");
                         }
                     } else {
                         log::info!("Activating preset via {source}: {name}");
@@ -421,13 +432,31 @@ pub fn run() {
                         // Preset activation or throw via D-Bus (CLI / CiderDeck)
                         result = preset_rx.recv() => {
                             if let Ok(name) = result {
-                                handle_preset_or_throw(&name, "D-Bus", backend_arc.as_ref(), &config_arc).await;
+                                handle_preset_or_throw(&name, "D-Bus", backend_arc.as_ref(), &config_arc, &tiling_state_arc).await;
                             }
                         }
                         // Preset activation or throw via tray menu
                         result = preset_tray_rx.recv() => {
                             if let Ok(name) = result {
-                                handle_preset_or_throw(&name, "tray", backend_arc.as_ref(), &config_arc).await;
+                                handle_preset_or_throw(&name, "tray", backend_arc.as_ref(), &config_arc, &tiling_state_arc).await;
+                            }
+                        }
+                        // Window closed: remove from zone tracker, surface next in stack
+                        result = window_event_rx.recv() => {
+                            if let Ok(window_id) = result {
+                                log::info!("Window removed event: {window_id}");
+                                let cfg = config_arc.read().await.clone();
+                                if let Some((_zone_id, surface_entries)) = tiling_state_arc.zone_find_and_remove(&window_id) {
+                                    if cfg.auto_surface_tabs && !surface_entries.is_empty() {
+                                        for entry in &surface_entries {
+                                            if let Err(e) = tiling::surface_zone_entry(backend_arc.as_ref(), &tiling_state_arc, entry).await {
+                                                log::error!("Failed to surface after window close: {e}");
+                                            }
+                                        }
+                                    }
+                                }
+                                // Also clean last_action for the closed window
+                                tiling_state_arc.clear_last_action(&window_id);
                             }
                         }
                         // Session Ghost: capture session on shutdown

@@ -54,6 +54,19 @@ impl PaveResizeReceiver {
     }
 }
 
+/// D-Bus object that receives window lifecycle events from KWin scripts
+struct PaveWindowEventReceiver {
+    sender: broadcast::Sender<String>,
+}
+
+#[interface(name = "com.pave.WindowEvents")]
+impl PaveWindowEventReceiver {
+    async fn window_removed(&self, window_id: &str) {
+        log::info!("Window removed: {window_id}");
+        let _ = self.sender.send(window_id.to_string());
+    }
+}
+
 /// D-Bus object that receives preset activation requests (from CLI or CiderDeck)
 struct PavePresetReceiver {
     sender: broadcast::Sender<String>,
@@ -69,6 +82,11 @@ impl PavePresetReceiver {
     async fn throw_monitor(&self) {
         log::info!("Throw to monitor requested via D-Bus");
         let _ = self.sender.send("__throw__".to_string());
+    }
+
+    async fn resurface(&self) {
+        log::info!("Resurface zones requested via D-Bus");
+        let _ = self.sender.send("__resurface__".to_string());
     }
 }
 
@@ -87,6 +105,7 @@ impl KWinBackend {
             broadcast::Receiver<String>,
             broadcast::Receiver<String>,
             broadcast::Receiver<String>,
+            broadcast::Receiver<String>,
         ),
         String,
     > {
@@ -100,8 +119,9 @@ impl KWinBackend {
         let (shortcut_tx, shortcut_rx) = broadcast::channel(16);
         let (resize_tx, resize_rx) = broadcast::channel(16);
         let (preset_tx, preset_rx) = broadcast::channel(16);
+        let (window_event_tx, window_event_rx) = broadcast::channel(16);
 
-        // Register D-Bus objects for script data callbacks, shortcut presses, and resize events
+        // Register D-Bus objects for script data callbacks, shortcut presses, resize events, and window lifecycle
         let script_receiver = PaveScriptReceiver {
             sender: result_sender.clone(),
         };
@@ -113,6 +133,9 @@ impl KWinBackend {
         };
         let preset_receiver = PavePresetReceiver {
             sender: preset_tx,
+        };
+        let window_event_receiver = PaveWindowEventReceiver {
+            sender: window_event_tx,
         };
 
         connection
@@ -139,6 +162,12 @@ impl KWinBackend {
             .await
             .map_err(|e| format!("Failed to register preset receiver: {e}"))?;
 
+        connection
+            .object_server()
+            .at("/com/pave/WindowEvents", window_event_receiver)
+            .await
+            .map_err(|e| format!("Failed to register window event receiver: {e}"))?;
+
         // Request a well-known name so KWin scripts can find us
         connection
             .request_name("com.pave.app")
@@ -153,6 +182,7 @@ impl KWinBackend {
             shortcut_rx,
             resize_rx,
             preset_rx,
+            window_event_rx,
         ))
     }
 
