@@ -254,15 +254,6 @@ pub fn run() {
                     }
                 }
 
-                // Scan existing windows to populate zone tracker + last_action
-                if let Err(e) = tiling::scan_existing_windows(
-                    backend_arc.as_ref(),
-                    &config,
-                    &tiling_state_arc,
-                ).await {
-                    log::error!("Startup window scan failed: {e}");
-                }
-
                 // Session Ghost: restore last session on startup if enabled
                 if config.restore_session {
                     let cfg = config_arc.read().await;
@@ -273,6 +264,35 @@ pub fn run() {
                             log::error!("Session restore failed: {e}");
                         }
                     }
+                }
+
+                // Scan existing windows to populate zone tracker + last_action
+                // (runs after session restore so windows are in their final positions)
+                if let Err(e) = tiling::scan_existing_windows(
+                    backend_arc.as_ref(),
+                    &config,
+                    &tiling_state_arc,
+                ).await {
+                    log::error!("Startup window scan failed: {e}");
+                }
+
+                // Delayed re-scan: KWin may still be settling windows after reboot.
+                // Re-scan after a few seconds to catch any stragglers.
+                {
+                    let backend = backend_arc.clone();
+                    let cfg = config.clone();
+                    let ts = tiling_state_arc.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        log::info!("Running delayed startup re-scan");
+                        if let Err(e) = tiling::scan_existing_windows(
+                            backend.as_ref(),
+                            &cfg,
+                            &ts,
+                        ).await {
+                            log::error!("Delayed startup scan failed: {e}");
+                        }
+                    });
                 }
 
                 // Helper closure for preset/throw dispatch via D-Bus or tray channels
