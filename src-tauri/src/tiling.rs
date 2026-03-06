@@ -397,6 +397,8 @@ pub struct TilingState {
     last_action: Mutex<HashMap<String, (String, usize, Instant)>>,
     /// Original geometry before first snap/maximize/grow (for restore)
     pre_snap_geometry: Mutex<HashMap<String, Rect>>,
+    /// Tiled geometry saved when entering the maximize cycle (for returning to tile)
+    pre_maximize_geometry: Mutex<HashMap<String, Rect>>,
     /// Zone tracker for tab zone system
     zone_tracker: Mutex<ZoneTracker>,
 }
@@ -455,6 +457,7 @@ impl TilingState {
         Self {
             last_action: Mutex::new(HashMap::new()),
             pre_snap_geometry: Mutex::new(HashMap::new()),
+            pre_maximize_geometry: Mutex::new(HashMap::new()),
             zone_tracker: Mutex::new(ZoneTracker::new()),
         }
     }
@@ -496,6 +499,18 @@ impl TilingState {
     /// Remove and return pre-snap geometry for restore.
     fn take_pre_snap_geometry(&self, window_id: &str) -> Option<Rect> {
         let mut geo = self.pre_snap_geometry.lock().unwrap();
+        geo.remove(window_id)
+    }
+
+    /// Save geometry at the moment the window enters the maximize cycle (for tile restore).
+    fn save_pre_maximize_geometry(&self, window_id: &str, rect: Rect) {
+        let mut geo = self.pre_maximize_geometry.lock().unwrap();
+        geo.insert(window_id.to_string(), rect);
+    }
+
+    /// Remove and return the pre-maximize geometry (tile restore on third press).
+    fn take_pre_maximize_geometry(&self, window_id: &str) -> Option<Rect> {
+        let mut geo = self.pre_maximize_geometry.lock().unwrap();
         geo.remove(window_id)
     }
 
@@ -1277,17 +1292,25 @@ pub async fn handle_maximize(
         // KWin-maximized (user did it manually) -> unmaximize, then almost-maximize
         log::info!("Action: unmaximize then almost-maximize");
         wm.unmaximize_window(&window.id).await?;
+        state.save_pre_maximize_geometry(&window.id, current_rect);
         wm.move_window(&window.id, almost_rect.x, almost_rect.y, almost_rect.width, almost_rect.height)
             .await?;
         state.set_last_action(&window.id, "almost_maximize", mon_idx);
         auto_tab_after_snap(wm, config, state, &window.id, "almost_maximize", mon_idx, almost_rect).await?;
     } else if was_full_maximized || rects_approx_equal(&current_rect, &full_rect) {
-        // Full-size -> almost-maximize
-        log::info!("Action: full-size to almost-maximize");
-        wm.move_window(&window.id, almost_rect.x, almost_rect.y, almost_rect.width, almost_rect.height)
-            .await?;
-        state.set_last_action(&window.id, "almost_maximize", mon_idx);
-        auto_tab_after_snap(wm, config, state, &window.id, "almost_maximize", mon_idx, almost_rect).await?;
+        // Full-size -> restore to tiled position (if saved), otherwise almost-maximize
+        if let Some(tile_rect) = state.take_pre_maximize_geometry(&window.id) {
+            log::info!("Action: full-size to tiled restore ({},{} {}x{})", tile_rect.x, tile_rect.y, tile_rect.width, tile_rect.height);
+            wm.move_window(&window.id, tile_rect.x, tile_rect.y, tile_rect.width, tile_rect.height)
+                .await?;
+            state.clear_last_action(&window.id);
+        } else {
+            log::info!("Action: full-size to almost-maximize (no tile saved)");
+            wm.move_window(&window.id, almost_rect.x, almost_rect.y, almost_rect.width, almost_rect.height)
+                .await?;
+            state.set_last_action(&window.id, "almost_maximize", mon_idx);
+            auto_tab_after_snap(wm, config, state, &window.id, "almost_maximize", mon_idx, almost_rect).await?;
+        }
     } else if was_almost_maximized || rects_approx_equal(&current_rect, &almost_rect) {
         // Almost-maximized -> full-size (just geometry, no KWin maximize)
         log::info!("Action: almost-maximize to full-size");
@@ -1296,9 +1319,10 @@ pub async fn handle_maximize(
         state.set_last_action(&window.id, "full_maximize", mon_idx);
         auto_tab_after_snap(wm, config, state, &window.id, "full_maximize", mon_idx, full_rect).await?;
     } else {
-        // Neither -> almost-maximize
+        // Neither -> almost-maximize; save current position so we can return to it
         log::info!("Action: almost-maximize");
         state.save_pre_snap_geometry(&window.id, current_rect);
+        state.save_pre_maximize_geometry(&window.id, current_rect);
         wm.move_window(&window.id, almost_rect.x, almost_rect.y, almost_rect.width, almost_rect.height)
             .await?;
         state.set_last_action(&window.id, "almost_maximize", mon_idx);
