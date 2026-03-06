@@ -8,100 +8,203 @@
     <script type="module" src="/src/main.ts" defer></script>
   </head>
   <body>
-    <main class="container">
-      <h1>Pave</h1>
-      <p class="subtitle">Window Tiling</p>
-
-      <section class="setting-group">
-        <label for="gap-slider">
-          Gap Size: <span id="gap-value">15</span>px
-        </label>
-        <input type="range" id="gap-slider" min="0" max="30" value="15" />
-      </section>
-
-      <section class="setting-group">
-        <label for="corner-slider">
-          Corner Radius: <span id="corner-value">0</span>px
-        </label>
-        <input type="range" id="corner-slider" min="0" max="20" value="0" />
-        <p class="setting-hint">Controls window corner rounding via ShapeCorners</p>
-      </section>
-
-      <section class="setting-group">
-        <label>Monitors</label>
-        <div id="monitors-list" class="monitors-list">
-          <p class="loading">Loading monitors...</p>
+    <div class="app-layout">
+      <!-- Sidebar -->
+      <nav class="sidebar">
+        <div class="sidebar-header">
+          <h1 class="app-title">Pave</h1>
+          <p class="app-subtitle">Window Tiling</p>
         </div>
-      </section>
+        <ul class="nav-list">
+          <li class="nav-item active" data-section="appearance">Appearance</li>
+          <li class="nav-item" data-section="shortcuts">Shortcuts</li>
+          <li class="nav-item" data-section="presets">Presets</li>
+          <li class="nav-item" data-section="behavior">Behavior</li>
+          <li class="nav-item" data-section="about">About</li>
+        </ul>
+      </nav>
 
-      <section class="setting-group">
-        <label>Shortcuts</label>
-        <div class="shortcuts-list">
-          <div class="shortcut-row">
-            <span class="shortcut-label">Almost Maximize</span>
-            <kbd>Ctrl + Alt + Enter</kbd>
+      <!-- Content -->
+      <main class="content">
+        <!-- Appearance -->
+        <section class="section" id="section-appearance">
+          <h2 class="section-title">Appearance</h2>
+
+          <div class="card">
+            <div class="setting-row">
+              <div class="setting-label">
+                <span>Gap Size</span>
+                <span class="value-badge" id="gap-value">15px</span>
+              </div>
+              <input type="range" id="gap-slider" min="0" max="30" value="15" />
+            </div>
           </div>
-          <div class="shortcut-row">
-            <span class="shortcut-label">Snap Left / Shrink</span>
-            <kbd>Ctrl + Alt + Left</kbd>
+
+          <div class="card">
+            <div class="setting-row">
+              <div class="setting-label">
+                <span>Corner Radius</span>
+                <span class="value-badge" id="corner-value">0px</span>
+              </div>
+              <input type="range" id="corner-slider" min="0" max="20" value="0" />
+              <p class="setting-hint">Controls window corner rounding via ShapeCorners</p>
+            </div>
           </div>
-          <div class="shortcut-row">
-            <span class="shortcut-label">Snap Right / Grow</span>
-            <kbd>Ctrl + Alt + Right</kbd>
+
+          <div class="card">
+            <h3 class="card-title">Monitors</h3>
+            <div id="monitors-list" class="monitors-list">
+              <p class="loading">Loading monitors...</p>
+            </div>
           </div>
-          <div class="shortcut-row">
-            <span class="shortcut-label">Snap Up (Quarter) / Monitor Up</span>
-            <kbd>Ctrl + Alt + Up</kbd>
+        </section>
+
+        <!-- Shortcuts -->
+        <section class="section hidden" id="section-shortcuts">
+          <h2 class="section-title">Shortcuts</h2>
+
+          <div class="card">
+            <h3 class="card-title">Snapping</h3>
+            <div class="shortcut-row">
+              <span class="shortcut-label">Almost Maximize</span>
+              <kbd>Ctrl + Alt + Enter</kbd>
+            </div>
+            <div class="shortcut-row">
+              <span class="shortcut-label">Snap Left / Shrink</span>
+              <kbd>Ctrl + Alt + Left</kbd>
+            </div>
+            <div class="shortcut-row">
+              <span class="shortcut-label">Snap Right / Grow</span>
+              <kbd>Ctrl + Alt + Right</kbd>
+            </div>
           </div>
-          <div class="shortcut-row">
-            <span class="shortcut-label">Snap Down (Quarter) / Monitor Down</span>
-            <kbd>Ctrl + Alt + Down</kbd>
+
+          <div class="card">
+            <h3 class="card-title">Quarters</h3>
+            <div class="shortcut-row">
+              <span class="shortcut-label">Snap Up / Monitor Up</span>
+              <kbd>Ctrl + Alt + Up</kbd>
+            </div>
+            <div class="shortcut-row">
+              <span class="shortcut-label">Snap Down / Monitor Down</span>
+              <kbd>Ctrl + Alt + Down</kbd>
+            </div>
           </div>
-          <div class="shortcut-row">
-            <span class="shortcut-label">Cycle Tab Zone</span>
-            <kbd>Ctrl + Alt + Tab</kbd>
+
+          <div class="card">
+            <h3 class="card-title">Other</h3>
+            <div class="shortcut-row">
+              <span class="shortcut-label">Cycle Tab Zone</span>
+              <kbd>Ctrl + Alt + Tab</kbd>
+            </div>
           </div>
+        </section>
+
+        <!-- Presets -->
+        <section class="section hidden" id="section-presets">
+          <h2 class="section-title">Presets</h2>
+
+          <div class="card">
+            <div id="presets-list" class="presets-list">
+              <p class="loading">No presets saved</p>
+            </div>
+          </div>
+
+          <button id="capture-preset-btn" class="btn-secondary" type="button">Save Current Layout as Preset</button>
+        </section>
+
+        <!-- Behavior -->
+        <section class="section hidden" id="section-behavior">
+          <h2 class="section-title">Behavior</h2>
+
+          <div class="card">
+            <div class="toggle-row">
+              <div>
+                <span class="toggle-label">Auto-surface tabbed windows</span>
+                <p class="setting-hint">When a window leaves a zone, surface the hidden window behind it</p>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="auto-surface-toggle" checked />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="toggle-row">
+              <div>
+                <span class="toggle-label">Restore windows on startup</span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="restore-session-toggle" />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="toggle-row">
+              <div>
+                <span class="toggle-label">Start on login</span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="autostart-toggle" />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <!-- About -->
+        <section class="section hidden" id="section-about">
+          <h2 class="section-title">About</h2>
+
+          <div class="card about-card">
+            <h3 class="about-name">Pave</h3>
+            <p class="about-version">v0.1.0</p>
+            <p class="about-desc">A modern window tiling manager for KDE Plasma. Snap, resize, and organize your windows with ease.</p>
+            <div class="about-links">
+              <a href="#" id="link-github" class="about-link">GitHub</a>
+              <a href="#" id="link-kofi" class="about-link about-link-kofi">Ko-fi</a>
+            </div>
+          </div>
+        </section>
+
+        <!-- Save button (anchored at bottom) -->
+        <div class="save-bar" id="save-bar">
+          <button id="save-btn" type="button">Save</button>
         </div>
-      </section>
+      </main>
+    </div>
 
-      <section class="setting-group">
-        <label>Presets</label>
-        <div id="presets-list" class="presets-list">
-          <p class="loading">No presets saved</p>
+    <!-- Unsaved changes modal -->
+    <div class="modal-overlay hidden" id="unsaved-modal">
+      <div class="modal">
+        <h3 class="modal-title">Unsaved Changes</h3>
+        <p class="modal-desc">You have unsaved changes:</p>
+        <ul class="modal-changes" id="modal-changes-list"></ul>
+        <div class="modal-actions">
+          <button class="btn-modal btn-modal-save" id="modal-save">Save & Close</button>
+          <button class="btn-modal btn-modal-discard" id="modal-discard">Discard</button>
+          <button class="btn-modal btn-modal-cancel" id="modal-cancel">Cancel</button>
         </div>
-        <button id="capture-preset-btn" class="btn-secondary" type="button">Save Current Layout as Preset</button>
-      </section>
-
-      <section class="setting-group">
-        <label class="toggle-row">
-          <span>Auto-surface tabbed windows</span>
-          <input type="checkbox" id="auto-surface-toggle" checked />
-          <span class="toggle-slider"></span>
-        </label>
-        <p class="setting-hint">When a window leaves a zone, surface the hidden window behind it</p>
-      </section>
-
-      <section class="setting-group">
-        <label class="toggle-row">
-          <span>Restore windows on startup</span>
-          <input type="checkbox" id="restore-session-toggle" />
-          <span class="toggle-slider"></span>
-        </label>
-      </section>
-
-      <section class="setting-group">
-        <label class="toggle-row">
-          <span>Start on login</span>
-          <input type="checkbox" id="autostart-toggle" />
-          <span class="toggle-slider"></span>
-        </label>
-      </section>
-
-      <div class="actions">
-        <button id="save-btn" type="button">Save</button>
       </div>
+    </div>
 
-      <div id="status-msg" class="status-msg"></div>
-    </main>
+    <!-- Preset name modal -->
+    <div class="modal-overlay hidden" id="preset-name-modal">
+      <div class="modal">
+        <h3 class="modal-title">Save Preset</h3>
+        <p class="modal-desc">Enter a name for this layout preset:</p>
+        <input type="text" id="preset-name-input" class="modal-input" placeholder="e.g. Dev Layout" autocomplete="off" spellcheck="false" />
+        <div class="modal-actions">
+          <button class="btn-modal btn-modal-save" id="preset-name-ok">Save</button>
+          <button class="btn-modal btn-modal-cancel" id="preset-name-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast container -->
+    <div class="toast-container" id="toast-container"></div>
   </body>
 </html>

@@ -1,6 +1,6 @@
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
-    tray::TrayIconBuilder,
+    tray::{TrayIcon, TrayIconBuilder},
     AppHandle, Manager, WebviewWindowBuilder,
 };
 use tauri::WebviewUrl;
@@ -22,7 +22,7 @@ fn show_settings(app: &AppHandle) {
     // Create a new settings window on demand (avoids Wayland hide/show crash)
     match WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .title("Pave Settings")
-        .inner_size(480.0, 560.0)
+        .inner_size(600.0, 700.0)
         .resizable(false)
         .center()
         .build()
@@ -32,14 +32,8 @@ fn show_settings(app: &AppHandle) {
     }
 }
 
-pub fn setup_tray(
-    app: &AppHandle,
-    config: &PaveConfig,
-    preset_tx: broadcast::Sender<String>,
-    shutdown_tx: broadcast::Sender<()>,
-    backend: Arc<KWinBackend>,
-    config_lock: Arc<RwLock<PaveConfig>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+/// Build the tray menu with current presets. Used at startup and after preset changes.
+fn build_tray_menu(app: &AppHandle, config: &PaveConfig) -> Result<tauri::menu::Menu<tauri::Wry>, Box<dyn std::error::Error>> {
     let settings_item = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
     let separator1 = PredefinedMenuItem::separator(app)?;
 
@@ -79,8 +73,11 @@ pub fn setup_tray(
         .item(&throw_item)
         .item(&separator_throw);
 
-    // Add preset items
-    let preset_names: Vec<String> = config.presets.iter().map(|p| p.name.clone()).collect();
+    // Add preset items (filter out internal __last_session__)
+    let preset_names: Vec<String> = config.presets.iter()
+        .filter(|p| p.name != "__last_session__")
+        .map(|p| p.name.clone())
+        .collect();
     for name in &preset_names {
         let item_id = format!("preset_{}", name);
         let preset_item = MenuItemBuilder::with_id(&item_id, name).build(app)?;
@@ -93,7 +90,37 @@ pub fn setup_tray(
     }
 
     let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
-    let menu = menu_builder.item(&quit_item).build()?;
+    Ok(menu_builder.item(&quit_item).build()?)
+}
+
+/// Rebuild the tray menu with updated config. Call after preset changes.
+pub fn refresh_tray_menu(app: &AppHandle, config: &PaveConfig) {
+    let tray = match app.try_state::<TrayIcon>() {
+        Some(t) => t,
+        None => {
+            log::warn!("Cannot refresh tray menu: tray not initialized");
+            return;
+        }
+    };
+    match build_tray_menu(app, config) {
+        Ok(menu) => {
+            if let Err(e) = tray.set_menu(Some(menu)) {
+                log::error!("Failed to update tray menu: {e}");
+            }
+        }
+        Err(e) => log::error!("Failed to build tray menu: {e}"),
+    }
+}
+
+pub fn setup_tray(
+    app: &AppHandle,
+    config: &PaveConfig,
+    preset_tx: broadcast::Sender<String>,
+    shutdown_tx: broadcast::Sender<()>,
+    backend: Arc<KWinBackend>,
+    config_lock: Arc<RwLock<PaveConfig>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let menu = build_tray_menu(app, config)?;
 
     let icon = app
         .default_window_icon()
@@ -112,8 +139,6 @@ pub fn setup_tray(
                 }
                 "quit" => {
                     let _ = shutdown_tx.send(());
-                    // Give the shutdown handler a moment to save session, then hard exit.
-                    // app.exit() only tears down part of the process on Linux.
                     std::thread::spawn(|| {
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         std::process::exit(0);

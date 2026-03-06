@@ -8,7 +8,7 @@ use config::{PaveConfig, Preset};
 use platform::kwin::KWinBackend;
 use platform::MonitorInfo;
 use std::sync::Arc;
-use tauri::Manager;
+use tauri::{AppHandle, Manager};
 use tokio::sync::{broadcast, RwLock};
 
 struct AppState {
@@ -54,6 +54,7 @@ async fn is_first_run() -> Result<bool, String> {
 
 #[tauri::command]
 async fn capture_preset(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     name: String,
 ) -> Result<Preset, String> {
@@ -66,6 +67,7 @@ async fn capture_preset(
         cfg.presets.push(preset.clone());
     }
     cfg.save()?;
+    tray::refresh_tray_menu(&app, &cfg);
     Ok(preset)
 }
 
@@ -87,12 +89,15 @@ async fn activate_preset(
 
 #[tauri::command]
 async fn delete_preset(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     name: String,
 ) -> Result<(), String> {
     let mut cfg = state.config.write().await;
     cfg.presets.retain(|p| p.name != name);
-    cfg.save()
+    cfg.save()?;
+    tray::refresh_tray_menu(&app, &cfg);
+    Ok(())
 }
 
 #[tauri::command]
@@ -230,7 +235,7 @@ pub fn run() {
                         tauri::WebviewUrl::App("index.html".into()),
                     )
                     .title("Pave Settings")
-                    .inner_size(480.0, 560.0)
+                    .inner_size(600.0, 700.0)
                     .resizable(false)
                     .center()
                     .build()
