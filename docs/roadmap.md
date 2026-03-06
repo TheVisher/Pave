@@ -28,8 +28,8 @@ Pave is a zone-based window tiling manager that goes beyond snapping windows to 
 ### TODO for v1.0 Release
 - [ ] README with screenshots/GIFs showing key features
 - [ ] Clean up compiler warnings (dead code)
-- [ ] AUR package (or at least a PKGBUILD)
-- [ ] License file (decide: MIT, GPL, or dual)
+- [x] AUR package (`pave-git`)
+- [x] License file (MIT)
 - [ ] Settings UI polish (current layout names, active preset indicator)
 - [ ] First-run onboarding (brief overlay showing shortcuts)
 
@@ -147,7 +147,7 @@ These are ideas that could land in any version if they make sense:
 
 ### Launch Plan
 - Post to r/kde, r/unixporn, r/linux with GIFs
-- AUR package for Arch/CachyOS users
+- ~~AUR package for Arch/CachyOS users~~ ✅ `pave-git` on AUR
 - GitHub Releases with .deb and binary
 - Ko-fi / GitHub Sponsors link in README and settings UI
 
