@@ -15,7 +15,6 @@ struct AppState {
     config: Arc<RwLock<PaveConfig>>,
     tiling_state: Arc<tiling::TilingState>,
     backend: Arc<KWinBackend>,
-    preset_tx: broadcast::Sender<String>,
 }
 
 #[tauri::command]
@@ -231,7 +230,6 @@ pub fn run() {
                     config: config_arc.clone(),
                     tiling_state: tiling_state_arc.clone(),
                     backend: backend_arc.clone(),
-                    preset_tx: preset_tx.clone(),
                 };
 
                 handle2.manage(state);

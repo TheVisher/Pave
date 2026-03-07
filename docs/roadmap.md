@@ -26,11 +26,12 @@ Pave is a zone-based window tiling manager that goes beyond snapping windows to 
 - Stale process cleanup on startup
 
 ### TODO for v1.0 Release
-- [ ] README with screenshots/GIFs showing key features
+- [x] README (structure done, needs screenshots/GIFs)
+- [ ] Screenshots/GIFs for README showing key features
 - [ ] Clean up compiler warnings (dead code)
 - [x] AUR package (`pave-git`)
 - [x] License file (MIT)
-- [ ] Settings UI polish (current layout names, active preset indicator)
+- [x] Settings UI polish (current layout names, active preset indicator)
 - [ ] First-run onboarding (brief overlay showing shortcuts)
 
 ---

@@ -197,51 +197,6 @@ impl KWinBackend {
         .map_err(|e| format!("Failed to build D-Bus proxy ({dest} {path}): {e}"))
     }
 
-    /// Execute a KWin script (fire and forget, no output).
-    async fn run_kwin_script(&self, script: &str) -> Result<(), String> {
-        let proxy = self
-            .build_proxy("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting")
-            .await?;
-
-        let temp_dir = std::env::temp_dir();
-        let script_path = temp_dir.join("pave_kwin_script.js");
-        std::fs::write(&script_path, script)
-            .map_err(|e| format!("Failed to write temp script: {e}"))?;
-
-        let script_path_str = script_path
-            .to_str()
-            .ok_or("Invalid temp path")?
-            .to_string();
-
-        // Unload any previous instance
-        let _: Result<bool, _> = proxy.call("unloadScript", &("pave_temp",)).await;
-
-        let script_id: i32 = proxy
-            .call("loadScript", &(script_path_str.as_str(), "pave_temp"))
-            .await
-            .map_err(|e| format!("Failed to load KWin script: {e}"))?;
-
-        let script_obj_path = format!("/Scripting/Script{script_id}");
-        let script_proxy = self
-            .build_proxy("org.kde.KWin", &script_obj_path, "org.kde.kwin.Script")
-            .await?;
-
-        script_proxy
-            .call_noreply("run", &())
-            .await
-            .map_err(|e| format!("Failed to run KWin script: {e}"))?;
-
-        // Delay for execution before cleanup
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        // Cleanup
-        let _ = script_proxy.call_noreply("stop", &()).await;
-        let _: Result<bool, _> = proxy.call("unloadScript", &("pave_temp",)).await;
-        let _ = std::fs::remove_file(&script_path);
-
-        Ok(())
-    }
-
     /// Execute a KWin script that calls back to our D-Bus service with the result.
     async fn run_kwin_script_with_output(&self, inner_script: &str) -> Result<String, String> {
         log::debug!("Running KWin script with output callback");
@@ -668,27 +623,6 @@ impl KWinBackend {
         let info: WindowInfo =
             serde_json::from_str(&output).map_err(|e| format!("Failed to parse window: {e}"))?;
         Ok(Some(info))
-    }
-
-    pub async fn maximize_window(&self, window_id: &str) -> Result<(), String> {
-        log::info!("maximize_window: id={window_id}");
-        let script = format!(
-            r#"
-            var clients = workspace.stackingOrder;
-            for (var i = 0; i < clients.length; i++) {{
-                var c = clients[i];
-                if (c.internalId.toString() === "{window_id}") {{
-                    c.setMaximize(true, true);
-                    return "maximized";
-                }}
-            }}
-            return "not_found";
-            "#
-        );
-
-        let result = self.run_kwin_script_with_output(&script).await?;
-        log::info!("maximize_window result: {result}");
-        Ok(())
     }
 
     fn write_kwin_config(key: &str, value: &str) -> Result<(), String> {
