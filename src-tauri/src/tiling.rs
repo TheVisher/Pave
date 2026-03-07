@@ -1301,9 +1301,13 @@ pub async fn handle_maximize(
         // Full-size -> restore to tiled position (if saved), otherwise almost-maximize
         if let Some(tile_rect) = state.take_pre_maximize_geometry(&window.id) {
             log::info!("Action: full-size to tiled restore ({},{} {}x{})", tile_rect.x, tile_rect.y, tile_rect.width, tile_rect.height);
+            // Remove from the maximize zone so vacated-zone surfacing works correctly
+            state.zone_find_and_remove(&window.id);
             wm.move_window(&window.id, tile_rect.x, tile_rect.y, tile_rect.width, tile_rect.height)
                 .await?;
             state.clear_last_action(&window.id);
+            // Resurface all other zone tops that were minimized when we maximized
+            resurface_all_zones(wm, state).await?;
         } else {
             log::info!("Action: full-size to almost-maximize (no tile saved)");
             wm.move_window(&window.id, almost_rect.x, almost_rect.y, almost_rect.width, almost_rect.height)
