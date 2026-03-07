@@ -397,8 +397,8 @@ pub struct TilingState {
     last_action: Mutex<HashMap<String, (String, usize, Instant)>>,
     /// Original geometry before first snap/maximize/grow (for restore)
     pre_snap_geometry: Mutex<HashMap<String, Rect>>,
-    /// Tiled geometry saved when entering the maximize cycle (for returning to tile)
-    pre_maximize_geometry: Mutex<HashMap<String, Rect>>,
+    /// Tiled geometry and action saved when entering the maximize cycle (for returning to tile)
+    pre_maximize_geometry: Mutex<HashMap<String, (Rect, String)>>,
     /// Zone tracker for tab zone system
     zone_tracker: Mutex<ZoneTracker>,
 }
@@ -502,14 +502,14 @@ impl TilingState {
         geo.remove(window_id)
     }
 
-    /// Save geometry at the moment the window enters the maximize cycle (for tile restore).
-    fn save_pre_maximize_geometry(&self, window_id: &str, rect: Rect) {
+    /// Save geometry and action at the moment the window enters the maximize cycle (for tile restore).
+    fn save_pre_maximize_geometry(&self, window_id: &str, rect: Rect, action: &str) {
         let mut geo = self.pre_maximize_geometry.lock().unwrap();
-        geo.insert(window_id.to_string(), rect);
+        geo.insert(window_id.to_string(), (rect, action.to_string()));
     }
 
-    /// Remove and return the pre-maximize geometry (tile restore on third press).
-    fn take_pre_maximize_geometry(&self, window_id: &str) -> Option<Rect> {
+    /// Remove and return the pre-maximize geometry and action (tile restore on third press).
+    fn take_pre_maximize_geometry(&self, window_id: &str) -> Option<(Rect, String)> {
         let mut geo = self.pre_maximize_geometry.lock().unwrap();
         geo.remove(window_id)
     }
@@ -1291,21 +1291,24 @@ pub async fn handle_maximize(
     if window.maximized {
         // KWin-maximized (user did it manually) -> unmaximize, then almost-maximize
         log::info!("Action: unmaximize then almost-maximize");
+        let prev_action = last_action.as_deref().unwrap_or("unknown");
         wm.unmaximize_window(&window.id).await?;
-        state.save_pre_maximize_geometry(&window.id, current_rect);
+        state.save_pre_maximize_geometry(&window.id, current_rect, prev_action);
         wm.move_window(&window.id, almost_rect.x, almost_rect.y, almost_rect.width, almost_rect.height)
             .await?;
         state.set_last_action(&window.id, "almost_maximize", mon_idx);
         auto_tab_after_snap(wm, config, state, &window.id, "almost_maximize", mon_idx, almost_rect).await?;
     } else if was_full_maximized || rects_approx_equal(&current_rect, &full_rect) {
         // Full-size -> restore to tiled position (if saved), otherwise almost-maximize
-        if let Some(tile_rect) = state.take_pre_maximize_geometry(&window.id) {
-            log::info!("Action: full-size to tiled restore ({},{} {}x{})", tile_rect.x, tile_rect.y, tile_rect.width, tile_rect.height);
-            // Remove from the maximize zone so vacated-zone surfacing works correctly
+        if let Some((tile_rect, tile_action)) = state.take_pre_maximize_geometry(&window.id) {
+            log::info!("Action: full-size to tiled restore '{}' ({},{} {}x{})", tile_action, tile_rect.x, tile_rect.y, tile_rect.width, tile_rect.height);
+            // Remove from the maximize zone before re-registering in the tile zone
             state.zone_find_and_remove(&window.id);
             wm.move_window(&window.id, tile_rect.x, tile_rect.y, tile_rect.width, tile_rect.height)
                 .await?;
-            state.clear_last_action(&window.id);
+            // Restore the original tiled action and zone registration
+            state.set_last_action(&window.id, &tile_action, mon_idx);
+            auto_tab_after_snap(wm, config, state, &window.id, &tile_action, mon_idx, tile_rect).await?;
             // Resurface all other zone tops that were minimized when we maximized
             resurface_all_zones(wm, state).await?;
         } else {
@@ -1324,9 +1327,10 @@ pub async fn handle_maximize(
         auto_tab_after_snap(wm, config, state, &window.id, "full_maximize", mon_idx, full_rect).await?;
     } else {
         // Neither -> almost-maximize; save current position so we can return to it
-        log::info!("Action: almost-maximize");
+        let prev_action = last_action.as_deref().unwrap_or("unknown");
+        log::info!("Action: almost-maximize (saving tile action '{}')", prev_action);
         state.save_pre_snap_geometry(&window.id, current_rect);
-        state.save_pre_maximize_geometry(&window.id, current_rect);
+        state.save_pre_maximize_geometry(&window.id, current_rect, prev_action);
         wm.move_window(&window.id, almost_rect.x, almost_rect.y, almost_rect.width, almost_rect.height)
             .await?;
         state.set_last_action(&window.id, "almost_maximize", mon_idx);
