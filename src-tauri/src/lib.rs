@@ -174,12 +174,23 @@ pub fn run() {
             // Initialize backend and state in async context
             let handle2 = handle.clone();
             tauri::async_runtime::spawn(async move {
-                let (backend, mut shortcut_rx, mut resize_rx, mut preset_rx, mut window_event_rx) =
-                    match KWinBackend::new().await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        log::error!("Failed to initialize KWin backend: {e}");
-                        return;
+                // Retry KWin backend init with backoff — on login, KWin's D-Bus
+                // may not be ready yet when Pave autostarts.
+                let (backend, mut shortcut_rx, mut resize_rx, mut preset_rx, mut window_event_rx) = {
+                    let mut attempt = 0u32;
+                    loop {
+                        match KWinBackend::new().await {
+                            Ok(b) => break b,
+                            Err(e) => {
+                                attempt += 1;
+                                if attempt >= 10 {
+                                    log::error!("Failed to initialize KWin backend after {attempt} attempts: {e}");
+                                    return;
+                                }
+                                log::warn!("KWin backend not ready (attempt {attempt}/10): {e}");
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            }
+                        }
                     }
                 };
 
