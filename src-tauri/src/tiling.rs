@@ -1164,6 +1164,30 @@ fn build_layout_preserving_splits(new_v_ratio: f64, old_layout: &ZoneLayout) -> 
 /// If the layout has a horizontal split but no windows occupy the quarter zones,
 /// merge the split back to a simple leaf. This keeps the layout in sync when
 /// windows are zone-snapped or surfaced out of quarter positions.
+/// Compute the current zone rect for a snap action using the layout tree.
+/// Looks up the monitor from the action's last known monitor index, then
+/// resolves the leaf from the layout. Returns None if it can't resolve.
+fn compute_zone_rect_for_entry(
+    state: &TilingState,
+    snap_action: &str,
+    monitors: &[MonitorInfo],
+    gap: u32,
+) -> Option<Rect> {
+    let leaf_id = ZoneLeafId::from_action(snap_action)?;
+
+    // Try each monitor's layout to find the leaf
+    for monitor in monitors {
+        let layout = state.get_or_create_layout(&monitor.name);
+        let rects = layout.compute_rects(monitor, gap);
+        if let Some(rect) = rects.get(&leaf_id) {
+            return Some(*rect);
+        }
+    }
+
+    // Fallback: use action_to_rect with first monitor
+    monitors.first().map(|m| action_to_rect(snap_action, m, gap))
+}
+
 fn reconcile_layout(state: &TilingState, monitor_name: &str, mon_idx: usize) {
     let layout = state.get_or_create_layout(monitor_name);
     let h_split = get_horizontal_split_side(&layout);
@@ -1884,7 +1908,7 @@ pub async fn handle_grow_shrink(
 /// - Same-zone stacking: cycles between individual windows
 pub async fn handle_tab_cycle(
     wm: &KWinBackend,
-    _config: &PaveConfig,
+    config: &PaveConfig,
     state: &TilingState,
 ) -> Result<(), String> {
     let window = wm
@@ -1911,21 +1935,26 @@ pub async fn handle_tab_cycle(
         }
 
         let monitors = wm.get_monitors().await?;
+        let gap = config.gap_size;
         let mut last_shown_id = None;
 
         for entry in &to_show {
+            // Compute current zone rect from the layout tree
+            let rect = compute_zone_rect_for_entry(state, &entry.snap_action, &monitors, gap)
+                .unwrap_or(entry.geometry);
+
             wm.unminimize_window(&entry.window_id).await?;
             wm.move_window(
                 &entry.window_id,
-                entry.geometry.x,
-                entry.geometry.y,
-                entry.geometry.width,
-                entry.geometry.height,
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
             )
             .await?;
 
             // Set last_action for each shown window
-            let mon_idx = mon_idx_from_geometry(&entry.geometry, &monitors);
+            let mon_idx = mon_idx_from_geometry(&rect, &monitors);
             state.set_last_action(&entry.window_id, &entry.snap_action, mon_idx);
             last_shown_id = Some(entry.window_id.clone());
         }
@@ -1948,19 +1977,22 @@ pub async fn handle_tab_cycle(
                 }
             }
 
+            let monitors = wm.get_monitors().await?;
+            let rect = compute_zone_rect_for_entry(state, &entry.snap_action, &monitors, config.gap_size)
+                .unwrap_or(entry.geometry);
+
             wm.unminimize_window(&entry.window_id).await?;
             wm.move_window(
                 &entry.window_id,
-                entry.geometry.x,
-                entry.geometry.y,
-                entry.geometry.width,
-                entry.geometry.height,
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
             )
             .await?;
             wm.activate_window(&entry.window_id).await?;
 
-            let monitors = wm.get_monitors().await?;
-            let mon_idx = mon_idx_from_geometry(&entry.geometry, &monitors);
+            let mon_idx = mon_idx_from_geometry(&rect, &monitors);
             state.set_last_action(&entry.window_id, &entry.snap_action, mon_idx);
         } else {
             log::debug!("Tab cycle: no windows to cycle or surface");
