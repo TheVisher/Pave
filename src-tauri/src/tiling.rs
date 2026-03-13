@@ -75,6 +75,35 @@ impl ZoneSide {
             _ => None,
         }
     }
+
+    /// Returns the adjacent zone in a given direction, if one exists.
+    fn adjacent(&self, dir: Direction) -> Option<ZoneSide> {
+        match (self, dir) {
+            // Horizontal: half zones
+            (ZoneSide::Left, Direction::Right) => Some(ZoneSide::Right),
+            (ZoneSide::Right, Direction::Left) => Some(ZoneSide::Left),
+
+            // Horizontal: quarter zones
+            (ZoneSide::TopLeft, Direction::Right) => Some(ZoneSide::TopRight),
+            (ZoneSide::TopRight, Direction::Left) => Some(ZoneSide::TopLeft),
+            (ZoneSide::BottomLeft, Direction::Right) => Some(ZoneSide::BottomRight),
+            (ZoneSide::BottomRight, Direction::Left) => Some(ZoneSide::BottomLeft),
+
+            // Vertical: quarter zones
+            (ZoneSide::TopLeft, Direction::Down) => Some(ZoneSide::BottomLeft),
+            (ZoneSide::BottomLeft, Direction::Up) => Some(ZoneSide::TopLeft),
+            (ZoneSide::TopRight, Direction::Down) => Some(ZoneSide::BottomRight),
+            (ZoneSide::BottomRight, Direction::Up) => Some(ZoneSide::TopRight),
+
+            // Vertical on half zones: move into quarter
+            (ZoneSide::Left, Direction::Down) => Some(ZoneSide::BottomLeft),
+            (ZoneSide::Left, Direction::Up) => Some(ZoneSide::TopLeft),
+            (ZoneSide::Right, Direction::Down) => Some(ZoneSide::BottomRight),
+            (ZoneSide::Right, Direction::Up) => Some(ZoneSide::TopRight),
+
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -397,6 +426,9 @@ pub struct TilingState {
     last_action: Mutex<HashMap<String, (String, usize, Instant)>>,
     /// Original geometry before first snap/maximize/grow (for restore)
     pre_snap_geometry: Mutex<HashMap<String, Rect>>,
+    /// Last known geometry for a zone, saved when a zone becomes empty via zone snap.
+    /// Allows windows to return to the correct size when zone-snapping back.
+    zone_last_geometry: Mutex<HashMap<ZoneId, Rect>>,
     /// Tiled geometry and action saved when entering the maximize cycle (for returning to tile)
     pre_maximize_geometry: Mutex<HashMap<String, (Rect, String)>>,
     /// Zone tracker for tab zone system
@@ -416,7 +448,7 @@ pub enum SnapVertical {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Direction {
+pub enum Direction {
     Left,
     Right,
     Up,
@@ -459,6 +491,7 @@ impl TilingState {
             pre_snap_geometry: Mutex::new(HashMap::new()),
             pre_maximize_geometry: Mutex::new(HashMap::new()),
             zone_tracker: Mutex::new(ZoneTracker::new()),
+            zone_last_geometry: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1453,6 +1486,7 @@ pub async fn handle_snap(
                 wm.move_window(&window.id, quarter_rect.x, quarter_rect.y, quarter_rect.width, quarter_rect.height).await?;
                 state.set_last_action(&window.id, action, mon_idx);
                 auto_tab_after_snap(wm, config, state, &window.id, action, mon_idx, quarter_rect).await?;
+                cooperative_resize(wm, config, state, &window.id, &quarter_rect, monitor, mon_idx).await?;
             }
         }
 
@@ -1480,6 +1514,7 @@ pub async fn handle_snap(
                 wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height).await?;
                 state.set_last_action(&window.id, action, mon_idx);
                 auto_tab_after_snap(wm, config, state, &window.id, action, mon_idx, rect).await?;
+                cooperative_resize(wm, config, state, &window.id, &rect, monitor, mon_idx).await?;
             } else {
                 // Edge of spectrum — try crossing to adjacent monitor
                 let direction = match side {
@@ -1530,6 +1565,7 @@ pub async fn handle_snap(
 
             state.set_last_action(&window.id, action_name, mon_idx);
             auto_tab_after_snap(wm, config, state, &window.id, action_name, mon_idx, final_rect).await?;
+            cooperative_resize(wm, config, state, &window.id, &final_rect, monitor, mon_idx).await?;
         }
     }
 
@@ -2308,6 +2344,320 @@ pub async fn handle_resize_event(
             "Resize event: resized sibling '{}' to ({},{} {}x{})",
             sib.title, new_rect.x, new_rect.y, new_rect.width, new_rect.height
         );
+    }
+
+    Ok(())
+}
+
+/// After a snap, resize adjacent visible windows on the same monitor so they
+/// fill the remaining space cooperatively (no overlap, no gaps).
+async fn cooperative_resize(
+    wm: &KWinBackend,
+    config: &PaveConfig,
+    state: &TilingState,
+    snapped_window_id: &str,
+    snapped_rect: &Rect,
+    monitor: &MonitorInfo,
+    mon_idx: usize,
+) -> Result<(), String> {
+    let windows = wm.get_windows().await?;
+    let gap = config.gap_size;
+    let g = gap as i32;
+
+    for w in &windows {
+        if w.id == snapped_window_id || w.minimized || !is_window_on_monitor(w, monitor) {
+            continue;
+        }
+
+        let wrect = window_to_rect(w);
+        let mut new_rect = wrect;
+        let mut changed = false;
+
+        // Check if this window is horizontally adjacent to the snapped window.
+        // They must share vertical overlap to be considered adjacent.
+        if !vertical_overlap(snapped_rect.y, snapped_rect.height, wrect.y, wrect.height) {
+            continue;
+        }
+
+        // Snapped window is on the left, this window is to its right
+        if snapped_rect.x < wrect.x {
+            let new_x = snapped_rect.x + snapped_rect.width + g;
+            let new_width = (monitor.x + monitor.width - g) - new_x;
+            if new_width > 100 {
+                new_rect.x = new_x;
+                new_rect.width = new_width;
+                changed = true;
+            }
+        }
+        // Snapped window is on the right, this window is to its left
+        else if snapped_rect.x > wrect.x {
+            let new_width = (snapped_rect.x - g) - (monitor.x + g);
+            if new_width > 100 {
+                new_rect.x = monitor.x + g;
+                new_rect.width = new_width;
+                changed = true;
+            }
+        }
+
+        if changed {
+            log::info!(
+                "Cooperative resize: '{}' -> ({},{} {}x{})",
+                w.title, new_rect.x, new_rect.y, new_rect.width, new_rect.height
+            );
+            wm.move_window(&w.id, new_rect.x, new_rect.y, new_rect.width, new_rect.height)
+                .await?;
+
+            // Update the zone tracker with the new geometry
+            let action = state
+                .get_last_action(&w.id)
+                .map(|(a, _)| a)
+                .unwrap_or_default();
+            if !action.is_empty() {
+                if let Some(side) = ZoneSide::from_action(&action) {
+                    let zone_id = ZoneId { monitor_idx: mon_idx, side };
+                    let mut tracker = state.zone_tracker.lock().unwrap();
+                    // Update the geometry in the existing zone entry
+                    if let Some(entries) = tracker.zones.get_mut(&zone_id) {
+                        if let Some(entry) = entries.iter_mut().find(|e| e.window_id == w.id) {
+                            entry.geometry = new_rect;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Map a ZoneSide to its canonical snap action name.
+fn zone_side_to_action(side: &ZoneSide) -> String {
+    match side {
+        ZoneSide::Left => "snap_left".to_string(),
+        ZoneSide::Right => "snap_right".to_string(),
+        ZoneSide::TopLeft => "snap_top_left".to_string(),
+        ZoneSide::TopRight => "snap_top_right".to_string(),
+        ZoneSide::BottomLeft => "snap_bottom_left".to_string(),
+        ZoneSide::BottomRight => "snap_bottom_right".to_string(),
+        ZoneSide::Maximize => "almost_maximize".to_string(),
+    }
+}
+
+/// Map a snap action name to its standard geometry on a monitor.
+fn action_to_rect(action: &str, monitor: &MonitorInfo, gap: u32) -> Rect {
+    match action {
+        "snap_left" => snap_left_rect(monitor, gap),
+        "snap_right" => snap_right_rect(monitor, gap),
+        "snap_top_left" => snap_top_left_rect(monitor, gap),
+        "snap_top_right" => snap_top_right_rect(monitor, gap),
+        "snap_bottom_left" => snap_bottom_left_rect(monitor, gap),
+        "snap_bottom_right" => snap_bottom_right_rect(monitor, gap),
+        "almost_maximize" | "full_maximize" => almost_maximize_rect(monitor, gap),
+        _ => almost_maximize_rect(monitor, gap),
+    }
+}
+
+/// Move the active window into an adjacent zone. The displaced window in the
+/// target zone gets minimized and joins the tab cycle stack.
+pub async fn handle_zone_snap(
+    wm: &KWinBackend,
+    config: &PaveConfig,
+    state: &TilingState,
+    direction: Direction,
+) -> Result<(), String> {
+    let window = wm
+        .get_active_window()
+        .await?
+        .ok_or("No active window")?;
+
+    let monitors = wm.get_monitors().await?;
+    if monitors.is_empty() {
+        return Err("No monitors found".to_string());
+    }
+
+    let mon_idx = find_window_monitor(&window, &monitors);
+    let monitor = &monitors[mon_idx];
+    let gap = config.gap_size;
+
+    // Determine the window's current zone
+    let current_side = {
+        let tracker = state.zone_tracker.lock().unwrap();
+        tracker.find_zone(&window.id).map(|z| z.side.clone())
+    };
+
+    let current_side = match current_side {
+        Some(s) => s,
+        None => {
+            // Try to infer from last_action
+            let action = state.get_last_action(&window.id).map(|(a, _)| a);
+            match action.as_deref().and_then(ZoneSide::from_action) {
+                Some(s) => s,
+                None => {
+                    log::debug!("Zone snap: window not in any zone");
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    // Find adjacent zone
+    let target_side = match current_side.adjacent(direction) {
+        Some(s) => s,
+        None => {
+            log::debug!("Zone snap: no adjacent zone in direction {:?}", direction);
+            return Ok(());
+        }
+    };
+
+    let target_action = zone_side_to_action(&target_side);
+    let source_action = zone_side_to_action(&current_side);
+
+    let source_zone_id = ZoneId {
+        monitor_idx: mon_idx,
+        side: current_side,
+    };
+    let target_zone_id = ZoneId {
+        monitor_idx: mon_idx,
+        side: target_side,
+    };
+
+    // Check if the target zone is occupied — get the top entry's geometry
+    let target_top_entry = {
+        let tracker = state.zone_tracker.lock().unwrap();
+        tracker
+            .zones
+            .get(&target_zone_id)
+            .and_then(|entries| entries.last().cloned())
+            .filter(|e| e.window_id != window.id)
+    };
+
+    let target_zone_empty = target_top_entry.is_none();
+
+    // Target geometry: use the existing zone occupant's geometry if present,
+    // otherwise fall back to standard geometry for that zone side
+    let target_rect = target_top_entry
+        .as_ref()
+        .map(|e| e.geometry)
+        .unwrap_or_else(|| action_to_rect(&target_action, monitor, gap));
+
+    // Save the source zone's geometry before we remove the window,
+    // so we remember the zone's size if it becomes empty.
+    let source_rect = {
+        let tracker = state.zone_tracker.lock().unwrap();
+        tracker
+            .zones
+            .get(&source_zone_id)
+            .and_then(|entries| entries.iter().find(|e| e.window_id == window.id))
+            .map(|e| e.geometry)
+            .unwrap_or_else(|| window_to_rect(&window))
+    };
+
+    // Remove the active window from its current zone
+    {
+        let mut tracker = state.zone_tracker.lock().unwrap();
+        tracker.remove_window(&window.id);
+
+        // If the source zone is now empty, remember its geometry
+        let source_empty = tracker
+            .zones
+            .get(&source_zone_id)
+            .map_or(true, |e| e.is_empty());
+        if source_empty {
+            state.zone_last_geometry.lock().unwrap()
+                .insert(source_zone_id.clone(), source_rect);
+        }
+    }
+
+    // If the target zone is empty, try to use remembered geometry
+    let target_rect = if target_zone_empty {
+        state.zone_last_geometry.lock().unwrap()
+            .remove(&target_zone_id)
+            .unwrap_or(target_rect)
+    } else {
+        target_rect
+    };
+
+    if target_zone_empty {
+        // Target zone is empty — move window there visibly
+        {
+            let mut tracker = state.zone_tracker.lock().unwrap();
+            tracker.place_window_silent(
+                target_zone_id,
+                &window.id,
+                &target_action,
+                target_rect,
+            );
+        }
+
+        wm.move_window(
+            &window.id,
+            target_rect.x,
+            target_rect.y,
+            target_rect.width,
+            target_rect.height,
+        )
+        .await?;
+        state.set_last_action(&window.id, &target_action, mon_idx);
+
+        log::info!(
+            "Zone snap: moved '{}' from {} to empty zone {} ({},{} {}x{})",
+            window.title,
+            source_action,
+            target_action,
+            target_rect.x,
+            target_rect.y,
+            target_rect.width,
+            target_rect.height,
+        );
+    } else {
+        // Target zone is occupied — moved window becomes visible on top,
+        // existing window gets pushed into the stack (minimized)
+        let displaced = target_top_entry.unwrap();
+
+        {
+            let mut tracker = state.zone_tracker.lock().unwrap();
+            tracker.place_window_silent(
+                target_zone_id,
+                &window.id,
+                &target_action,
+                target_rect,
+            );
+        }
+
+        // Minimize the displaced window — it stays in the zone's tab stack
+        wm.minimize_window(&displaced.window_id).await?;
+
+        // Move the active window to the target zone (visible)
+        wm.move_window(
+            &window.id,
+            target_rect.x,
+            target_rect.y,
+            target_rect.width,
+            target_rect.height,
+        )
+        .await?;
+        state.set_last_action(&window.id, &target_action, mon_idx);
+
+        log::info!(
+            "Zone snap: moved '{}' from {} onto {} (displaced {} into stack)",
+            window.title,
+            source_action,
+            target_action,
+            displaced.window_id,
+        );
+    }
+
+    // Surface the next window in the source zone if one exists
+    if config.auto_surface_tabs {
+        let surface_entries = {
+            let tracker = state.zone_tracker.lock().unwrap();
+            tracker.collect_surface_entries(&source_zone_id)
+        };
+        for surf_entry in &surface_entries {
+            if surf_entry.window_id != window.id {
+                surface_zone_entry(wm, state, surf_entry).await?;
+            }
+        }
     }
 
     Ok(())

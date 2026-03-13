@@ -420,6 +420,42 @@ pub fn run() {
                                             )
                                             .await
                                         }
+                                        "pave_zone_snap_left" => {
+                                            tiling::handle_zone_snap(
+                                                wm.as_ref(),
+                                                &cfg,
+                                                &ts,
+                                                tiling::Direction::Left,
+                                            )
+                                            .await
+                                        }
+                                        "pave_zone_snap_right" => {
+                                            tiling::handle_zone_snap(
+                                                wm.as_ref(),
+                                                &cfg,
+                                                &ts,
+                                                tiling::Direction::Right,
+                                            )
+                                            .await
+                                        }
+                                        "pave_zone_snap_up" => {
+                                            tiling::handle_zone_snap(
+                                                wm.as_ref(),
+                                                &cfg,
+                                                &ts,
+                                                tiling::Direction::Up,
+                                            )
+                                            .await
+                                        }
+                                        "pave_zone_snap_down" => {
+                                            tiling::handle_zone_snap(
+                                                wm.as_ref(),
+                                                &cfg,
+                                                &ts,
+                                                tiling::Direction::Down,
+                                            )
+                                            .await
+                                        }
                                         _ => {
                                             log::debug!("Unknown shortcut action: {action}");
                                             Ok(())

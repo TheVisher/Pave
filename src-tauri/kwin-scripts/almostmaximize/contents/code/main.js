@@ -7,7 +7,7 @@
 registerShortcut(
     "AlmostMaximize",
     "Almost Maximize Window",
-    "Ctrl+Alt+Return",
+    "Meta+Alt+Return",
     function() {
         callDBus("com.pave.app", "/com/pave/Shortcuts",
                  "com.pave.Shortcuts", "ShortcutPressed", "pave_maximize");
@@ -17,7 +17,7 @@ registerShortcut(
 registerShortcut(
     "SnapLeft",
     "Snap Window Left with Gap",
-    "Ctrl+Alt+Left",
+    "Meta+Alt+Left",
     function() {
         callDBus("com.pave.app", "/com/pave/Shortcuts",
                  "com.pave.Shortcuts", "ShortcutPressed", "pave_snap_left");
@@ -27,7 +27,7 @@ registerShortcut(
 registerShortcut(
     "SnapRight",
     "Snap Window Right with Gap",
-    "Ctrl+Alt+Right",
+    "Meta+Alt+Right",
     function() {
         callDBus("com.pave.app", "/com/pave/Shortcuts",
                  "com.pave.Shortcuts", "ShortcutPressed", "pave_snap_right");
@@ -37,7 +37,7 @@ registerShortcut(
 registerShortcut(
     "SnapUp",
     "Snap Window Up (Quarter)",
-    "Ctrl+Alt+Up",
+    "Meta+Alt+Up",
     function() {
         callDBus("com.pave.app", "/com/pave/Shortcuts",
                  "com.pave.Shortcuts", "ShortcutPressed", "pave_snap_up");
@@ -47,7 +47,7 @@ registerShortcut(
 registerShortcut(
     "SnapDown",
     "Snap Window Down (Quarter)",
-    "Ctrl+Alt+Down",
+    "Meta+Alt+Down",
     function() {
         callDBus("com.pave.app", "/com/pave/Shortcuts",
                  "com.pave.Shortcuts", "ShortcutPressed", "pave_snap_down");
@@ -57,7 +57,7 @@ registerShortcut(
 registerShortcut(
     "RestoreWindow",
     "Restore Window to Pre-Snap Size",
-    "Ctrl+Alt+Z",
+    "Meta+Alt+Z",
     function() {
         callDBus("com.pave.app", "/com/pave/Shortcuts",
                  "com.pave.Shortcuts", "ShortcutPressed", "pave_restore");
@@ -67,7 +67,7 @@ registerShortcut(
 registerShortcut(
     "GrowWindow",
     "Grow Window by 10%",
-    "Ctrl+Alt+=",
+    "Meta+Alt+=",
     function() {
         callDBus("com.pave.app", "/com/pave/Shortcuts",
                  "com.pave.Shortcuts", "ShortcutPressed", "pave_grow");
@@ -77,7 +77,7 @@ registerShortcut(
 registerShortcut(
     "ShrinkWindow",
     "Shrink Window by 10%",
-    "Ctrl+Alt+-",
+    "Meta+Alt+-",
     function() {
         callDBus("com.pave.app", "/com/pave/Shortcuts",
                  "com.pave.Shortcuts", "ShortcutPressed", "pave_shrink");
@@ -87,10 +87,50 @@ registerShortcut(
 registerShortcut(
     "TabCycle",
     "Cycle Tabbed Windows in Zone",
-    "Ctrl+Alt+Tab",
+    "Meta+Alt+Tab",
     function() {
         callDBus("com.pave.app", "/com/pave/Shortcuts",
                  "com.pave.Shortcuts", "ShortcutPressed", "pave_tab_cycle");
+    }
+);
+
+registerShortcut(
+    "ZoneSnapLeft",
+    "Snap Window to Adjacent Left Zone",
+    "Shift+Meta+Alt+Left",
+    function() {
+        callDBus("com.pave.app", "/com/pave/Shortcuts",
+                 "com.pave.Shortcuts", "ShortcutPressed", "pave_zone_snap_left");
+    }
+);
+
+registerShortcut(
+    "ZoneSnapRight",
+    "Snap Window to Adjacent Right Zone",
+    "Shift+Meta+Alt+Right",
+    function() {
+        callDBus("com.pave.app", "/com/pave/Shortcuts",
+                 "com.pave.Shortcuts", "ShortcutPressed", "pave_zone_snap_right");
+    }
+);
+
+registerShortcut(
+    "ZoneSnapUp",
+    "Snap Window to Adjacent Upper Zone",
+    "Shift+Meta+Alt+Up",
+    function() {
+        callDBus("com.pave.app", "/com/pave/Shortcuts",
+                 "com.pave.Shortcuts", "ShortcutPressed", "pave_zone_snap_up");
+    }
+);
+
+registerShortcut(
+    "ZoneSnapDown",
+    "Snap Window to Adjacent Lower Zone",
+    "Shift+Meta+Alt+Down",
+    function() {
+        callDBus("com.pave.app", "/com/pave/Shortcuts",
+                 "com.pave.Shortcuts", "ShortcutPressed", "pave_zone_snap_down");
     }
 );
 

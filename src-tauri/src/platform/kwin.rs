@@ -281,16 +281,20 @@ impl KWinBackend {
             )
             .await?;
 
-        let shortcuts: [(&str, &str, i32); 9] = [
-            ("AlmostMaximize", "Almost Maximize Window", 0x0D000004),
-            ("SnapLeft", "Snap Window Left with Gap", 0x0D000012),
-            ("SnapRight", "Snap Window Right with Gap", 0x0D000014),
-            ("SnapUp", "Snap Window Up (Quarter)", 0x0D000013),
-            ("SnapDown", "Snap Window Down (Quarter)", 0x0D000015),
-            ("RestoreWindow", "Restore Window to Pre-Snap Size", 0x0C00005A),
-            ("GrowWindow", "Grow Window by 10%", 0x0C00003D),
-            ("ShrinkWindow", "Shrink Window by 10%", 0x0C00002D),
-            ("TabCycle", "Cycle Tabbed Windows in Zone", 0x0D000001),
+        let shortcuts: [(&str, &str, i32); 13] = [
+            ("AlmostMaximize", "Almost Maximize Window", 0x19000004),           // Meta+Alt+Return
+            ("SnapLeft", "Snap Window Left with Gap", 0x19000012),              // Meta+Alt+Left
+            ("SnapRight", "Snap Window Right with Gap", 0x19000014),            // Meta+Alt+Right
+            ("SnapUp", "Snap Window Up (Quarter)", 0x19000013),                 // Meta+Alt+Up
+            ("SnapDown", "Snap Window Down (Quarter)", 0x19000015),             // Meta+Alt+Down
+            ("RestoreWindow", "Restore Window to Pre-Snap Size", 0x1800005A),   // Meta+Alt+Z
+            ("GrowWindow", "Grow Window by 10%", 0x1800003D),                   // Meta+Alt+=
+            ("ShrinkWindow", "Shrink Window by 10%", 0x1800002D),              // Meta+Alt+-
+            ("TabCycle", "Cycle Tabbed Windows in Zone", 0x19000001),           // Meta+Alt+Tab
+            ("ZoneSnapLeft", "Snap Window to Adjacent Left Zone", 0x1B000012),  // Shift+Meta+Alt+Left
+            ("ZoneSnapRight", "Snap Window to Adjacent Right Zone", 0x1B000014),// Shift+Meta+Alt+Right
+            ("ZoneSnapUp", "Snap Window to Adjacent Upper Zone", 0x1B000013),   // Shift+Meta+Alt+Up
+            ("ZoneSnapDown", "Snap Window to Adjacent Lower Zone", 0x1B000015), // Shift+Meta+Alt+Down
         ];
 
         // Phase 1: For each key we want, check if another component owns it.
@@ -404,6 +408,7 @@ impl KWinBackend {
         let all_shortcuts = [
             "AlmostMaximize", "SnapLeft", "SnapRight",
             "SnapUp", "SnapDown", "RestoreWindow", "GrowWindow", "ShrinkWindow", "TabCycle",
+            "ZoneSnapLeft", "ZoneSnapRight", "ZoneSnapUp", "ZoneSnapDown",
         ];
         for name in all_shortcuts {
             let result: Result<bool, _> = kga_proxy
@@ -419,15 +424,19 @@ impl KWinBackend {
         // setForeignShortcut D-Bus calls don't work for keys that conflict with
         // KWin's built-in tiling on some setups.
         let shortcut_entries: &[(&str, &str, &str)] = &[
-            ("AlmostMaximize", "Ctrl+Alt+Return", "Almost Maximize Window"),
-            ("SnapLeft", "Ctrl+Alt+Left", "Snap Window Left with Gap"),
-            ("SnapRight", "Ctrl+Alt+Right", "Snap Window Right with Gap"),
-            ("SnapUp", "Ctrl+Alt+Up", "Snap Window Up (Quarter)"),
-            ("SnapDown", "Ctrl+Alt+Down", "Snap Window Down (Quarter)"),
-            ("RestoreWindow", "Ctrl+Alt+Z", "Restore Window to Pre-Snap Size"),
-            ("GrowWindow", "Ctrl+Alt+=", "Grow Window by 10%"),
-            ("ShrinkWindow", "Ctrl+Alt+-", "Shrink Window by 10%"),
-            ("TabCycle", "Ctrl+Alt+Tab", "Cycle Tabbed Windows in Zone"),
+            ("AlmostMaximize", "Meta+Alt+Return", "Almost Maximize Window"),
+            ("SnapLeft", "Meta+Alt+Left", "Snap Window Left with Gap"),
+            ("SnapRight", "Meta+Alt+Right", "Snap Window Right with Gap"),
+            ("SnapUp", "Meta+Alt+Up", "Snap Window Up (Quarter)"),
+            ("SnapDown", "Meta+Alt+Down", "Snap Window Down (Quarter)"),
+            ("RestoreWindow", "Meta+Alt+Z", "Restore Window to Pre-Snap Size"),
+            ("GrowWindow", "Meta+Alt+=", "Grow Window by 10%"),
+            ("ShrinkWindow", "Meta+Alt+-", "Shrink Window by 10%"),
+            ("TabCycle", "Meta+Alt+Tab", "Cycle Tabbed Windows in Zone"),
+            ("ZoneSnapLeft", "Shift+Meta+Alt+Left", "Snap Window to Adjacent Left Zone"),
+            ("ZoneSnapRight", "Shift+Meta+Alt+Right", "Snap Window to Adjacent Right Zone"),
+            ("ZoneSnapUp", "Shift+Meta+Alt+Up", "Snap Window to Adjacent Upper Zone"),
+            ("ZoneSnapDown", "Shift+Meta+Alt+Down", "Snap Window to Adjacent Lower Zone"),
         ];
         for (name, key, friendly) in shortcut_entries {
             let value = format!("{key},none,{friendly}");
