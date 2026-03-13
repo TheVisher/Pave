@@ -3,6 +3,7 @@ mod platform;
 mod presets;
 mod tiling;
 mod tray;
+mod zone_layout;
 
 use config::{PaveConfig, Preset};
 use platform::kwin::KWinBackend;
@@ -482,6 +483,7 @@ pub fn run() {
                                             if let Err(e) = tiling::handle_resize_event(
                                                 backend_arc.as_ref(),
                                                 &cfg,
+                                                &tiling_state_arc,
                                                 &event,
                                             ).await {
                                                 log::error!("Resize event handling failed: {e}");
@@ -518,7 +520,7 @@ pub fn run() {
                                 if let Some((_zone_id, surface_entries)) = tiling_state_arc.zone_find_and_remove(&window_id) {
                                     if cfg.auto_surface_tabs && !surface_entries.is_empty() {
                                         for entry in &surface_entries {
-                                            if let Err(e) = tiling::surface_zone_entry(backend_arc.as_ref(), &tiling_state_arc, entry).await {
+                                            if let Err(e) = tiling::surface_zone_entry(backend_arc.as_ref(), &tiling_state_arc, entry, cfg.gap_size).await {
                                                 log::error!("Failed to surface after window close: {e}");
                                             }
                                         }

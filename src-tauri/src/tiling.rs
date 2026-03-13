@@ -1,115 +1,16 @@
 use crate::config::PaveConfig;
 use crate::platform::kwin::KWinBackend;
 use crate::platform::{MonitorInfo, WindowInfo};
+use crate::zone_layout::{AdjacentDirection, ZoneLayout, ZoneLeafId};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
 
-/// Which logical zone a snap action belongs to
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ZoneSide {
-    Left,
-    Right,
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-    Maximize,
-}
-
-impl ZoneSide {
-    fn from_action(action: &str) -> Option<Self> {
-        if action.starts_with("snap_top_left") {
-            Some(ZoneSide::TopLeft)
-        } else if action.starts_with("snap_top_right") {
-            Some(ZoneSide::TopRight)
-        } else if action.starts_with("snap_bottom_left") {
-            Some(ZoneSide::BottomLeft)
-        } else if action.starts_with("snap_bottom_right") {
-            Some(ZoneSide::BottomRight)
-        } else if action.starts_with("snap_left") {
-            Some(ZoneSide::Left)
-        } else if action.starts_with("snap_right") {
-            Some(ZoneSide::Right)
-        } else if action == "almost_maximize" || action == "full_maximize" {
-            Some(ZoneSide::Maximize)
-        } else {
-            None
-        }
-    }
-
-    /// Returns the child zones that this zone fully covers.
-    /// Left covers TopLeft + BottomLeft, Right covers TopRight + BottomRight,
-    /// Maximize covers everything.
-    fn covered_children(&self) -> &'static [ZoneSide] {
-        match self {
-            ZoneSide::Left => &[ZoneSide::TopLeft, ZoneSide::BottomLeft],
-            ZoneSide::Right => &[ZoneSide::TopRight, ZoneSide::BottomRight],
-            ZoneSide::Maximize => &[
-                ZoneSide::Left, ZoneSide::Right,
-                ZoneSide::TopLeft, ZoneSide::TopRight,
-                ZoneSide::BottomLeft, ZoneSide::BottomRight,
-            ],
-            _ => &[],
-        }
-    }
-
-    /// Returns the parent zones that fully cover this zone.
-    /// TopLeft/BottomLeft are covered by Left and Maximize.
-    /// Left/Right are covered by Maximize.
-    fn covering_parents(&self) -> &'static [ZoneSide] {
-        match self {
-            ZoneSide::TopLeft | ZoneSide::BottomLeft => &[ZoneSide::Left, ZoneSide::Maximize],
-            ZoneSide::TopRight | ZoneSide::BottomRight => &[ZoneSide::Right, ZoneSide::Maximize],
-            ZoneSide::Left | ZoneSide::Right => &[ZoneSide::Maximize],
-            _ => &[],
-        }
-    }
-
-    /// Returns the immediate parent zone (not Maximize).
-    fn immediate_parent(&self) -> Option<ZoneSide> {
-        match self {
-            ZoneSide::TopLeft | ZoneSide::BottomLeft => Some(ZoneSide::Left),
-            ZoneSide::TopRight | ZoneSide::BottomRight => Some(ZoneSide::Right),
-            _ => None,
-        }
-    }
-
-    /// Returns the adjacent zone in a given direction, if one exists.
-    fn adjacent(&self, dir: Direction) -> Option<ZoneSide> {
-        match (self, dir) {
-            // Horizontal: half zones
-            (ZoneSide::Left, Direction::Right) => Some(ZoneSide::Right),
-            (ZoneSide::Right, Direction::Left) => Some(ZoneSide::Left),
-
-            // Horizontal: quarter zones
-            (ZoneSide::TopLeft, Direction::Right) => Some(ZoneSide::TopRight),
-            (ZoneSide::TopRight, Direction::Left) => Some(ZoneSide::TopLeft),
-            (ZoneSide::BottomLeft, Direction::Right) => Some(ZoneSide::BottomRight),
-            (ZoneSide::BottomRight, Direction::Left) => Some(ZoneSide::BottomLeft),
-
-            // Vertical: quarter zones
-            (ZoneSide::TopLeft, Direction::Down) => Some(ZoneSide::BottomLeft),
-            (ZoneSide::BottomLeft, Direction::Up) => Some(ZoneSide::TopLeft),
-            (ZoneSide::TopRight, Direction::Down) => Some(ZoneSide::BottomRight),
-            (ZoneSide::BottomRight, Direction::Up) => Some(ZoneSide::TopRight),
-
-            // Vertical on half zones: move into quarter
-            (ZoneSide::Left, Direction::Down) => Some(ZoneSide::BottomLeft),
-            (ZoneSide::Left, Direction::Up) => Some(ZoneSide::TopLeft),
-            (ZoneSide::Right, Direction::Down) => Some(ZoneSide::BottomRight),
-            (ZoneSide::Right, Direction::Up) => Some(ZoneSide::TopRight),
-
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ZoneId {
     monitor_idx: usize,
-    side: ZoneSide,
+    leaf_id: ZoneLeafId,
 }
 
 #[derive(Debug, Clone)]
@@ -154,30 +55,21 @@ impl ZoneTracker {
             }
         }
 
-        // Collect (but don't remove) windows in covered child zones
-        // e.g. snapping to Right minimizes windows in TopRight + BottomRight
-        for child_side in zone_id.side.covered_children() {
-            let child_zone = ZoneId {
-                monitor_idx: zone_id.monitor_idx,
-                side: child_side.clone(),
-            };
-            if let Some(entries) = self.zones.get(&child_zone) {
-                for entry in entries {
-                    if entry.window_id != window_id && !displaced.contains(&entry.window_id) {
-                        displaced.push(entry.window_id.clone());
-                    }
-                }
-            }
-        }
+        // Collect windows in overlapping zones (ancestors + descendants) on same monitor
+        let overlapping_ids: Vec<ZoneId> = self
+            .zones
+            .keys()
+            .filter(|k| {
+                k.monitor_idx == zone_id.monitor_idx
+                    && k.leaf_id != zone_id.leaf_id
+                    && (zone_id.leaf_id.is_ancestor_of(&k.leaf_id)
+                        || k.leaf_id.is_ancestor_of(&zone_id.leaf_id))
+            })
+            .cloned()
+            .collect();
 
-        // Collect (but don't remove) windows in parent zones that fully cover this zone
-        // e.g. snapping to TopRight minimizes a window in the Right zone
-        for parent_side in zone_id.side.covering_parents() {
-            let parent_zone = ZoneId {
-                monitor_idx: zone_id.monitor_idx,
-                side: parent_side.clone(),
-            };
-            if let Some(entries) = self.zones.get(&parent_zone) {
+        for overlapping_zone in &overlapping_ids {
+            if let Some(entries) = self.zones.get(overlapping_zone) {
                 for entry in entries {
                     if entry.window_id != window_id && !displaced.contains(&entry.window_id) {
                         displaced.push(entry.window_id.clone());
@@ -243,25 +135,29 @@ impl ZoneTracker {
     /// Cycle tab groups. Returns (entries to show, window IDs to hide).
     ///
     /// Group cycling logic:
-    /// - If current window is in a parent zone (e.g. Right) and children exist (TopRight + BottomRight):
+    /// - If current window is in a parent zone and children exist:
     ///   show all children, hide parent
-    /// - If current window is in a child zone (e.g. TopRight) and parent exists (Right):
+    /// - If current window is in a child zone and parent exists:
     ///   show parent, hide all children (siblings too)
     /// - If same-zone stacking (multiple windows in exact same zone): cycle within zone
     fn cycle_next(&self, current_window_id: &str) -> Option<(Vec<ZoneEntry>, Vec<String>)> {
         let zone_id = self.find_zone(current_window_id)?;
 
-        // Check for parent-child group cycling first
         // Case 1: Current is in a parent zone, children exist → show children, hide parent
-        let children = zone_id.side.covered_children();
-        if !children.is_empty() {
+        let child_zones: Vec<ZoneId> = self
+            .zones
+            .keys()
+            .filter(|k| {
+                k.monitor_idx == zone_id.monitor_idx
+                    && zone_id.leaf_id.is_ancestor_of(&k.leaf_id)
+            })
+            .cloned()
+            .collect();
+
+        if !child_zones.is_empty() {
             let mut child_entries = Vec::new();
-            for child_side in children {
-                let child_zone = ZoneId {
-                    monitor_idx: zone_id.monitor_idx,
-                    side: child_side.clone(),
-                };
-                if let Some(entries) = self.zones.get(&child_zone) {
+            for child_zone in &child_zones {
+                if let Some(entries) = self.zones.get(child_zone) {
                     if let Some(entry) = entries.last() {
                         child_entries.push(entry.clone());
                     }
@@ -272,22 +168,20 @@ impl ZoneTracker {
             }
         }
 
-        // Case 2: Current is in a child zone, parent exists → show parent, hide all siblings
-        if let Some(parent_side) = zone_id.side.immediate_parent() {
+        // Case 2: Current is in a child zone, immediate parent exists → show parent, hide all siblings
+        if let Some(parent_leaf_id) = zone_id.leaf_id.immediate_parent() {
             let parent_zone = ZoneId {
                 monitor_idx: zone_id.monitor_idx,
-                side: parent_side.clone(),
+                leaf_id: parent_leaf_id.clone(),
             };
             if let Some(parent_entries) = self.zones.get(&parent_zone) {
                 if let Some(parent_entry) = parent_entries.last() {
-                    // Collect all sibling child window IDs to hide
+                    // Collect all descendant window IDs to hide
                     let mut to_hide = Vec::new();
-                    for child_side in parent_side.covered_children() {
-                        let child_zone = ZoneId {
-                            monitor_idx: zone_id.monitor_idx,
-                            side: child_side.clone(),
-                        };
-                        if let Some(entries) = self.zones.get(&child_zone) {
+                    for (k, entries) in &self.zones {
+                        if k.monitor_idx == zone_id.monitor_idx
+                            && parent_leaf_id.is_ancestor_of(&k.leaf_id)
+                        {
                             for entry in entries {
                                 if !to_hide.contains(&entry.window_id) {
                                     to_hide.push(entry.window_id.clone());
@@ -331,8 +225,8 @@ impl ZoneTracker {
     }
 
     /// Collect all entries that should be surfaced when a zone is vacated.
-    /// Includes same-zone entries, entries in child zones, AND entries in
-    /// parent zones (if no sibling child still occupies the parent).
+    /// Includes same-zone entries, entries in descendant zones, AND entries in
+    /// parent zones (if no sibling descendant still occupies the parent).
     fn collect_surface_entries(&self, zone_id: &ZoneId) -> Vec<ZoneEntry> {
         let mut entries = Vec::new();
 
@@ -343,37 +237,30 @@ impl ZoneTracker {
             }
         }
 
-        // Surface from child zones (e.g. Right vacated → surface TopRight + BottomRight)
-        for child_side in zone_id.side.covered_children() {
-            let child_zone = ZoneId {
-                monitor_idx: zone_id.monitor_idx,
-                side: child_side.clone(),
-            };
-            if let Some(zone_entries) = self.zones.get(&child_zone) {
+        // Surface from descendant zones
+        for (k, zone_entries) in &self.zones {
+            if k.monitor_idx == zone_id.monitor_idx
+                && zone_id.leaf_id.is_ancestor_of(&k.leaf_id)
+            {
                 if let Some(entry) = zone_entries.last() {
                     entries.push(entry.clone());
                 }
             }
         }
 
-        // Surface from parent zones (e.g. TopLeft vacated → surface Left,
-        // but only if no sibling like BottomLeft still occupies).
-        if let Some(parent_side) = zone_id.side.immediate_parent() {
-            let siblings_occupied = parent_side.covered_children().iter().any(|child_side| {
-                if *child_side == zone_id.side {
-                    return false; // Skip the vacated zone itself
-                }
-                let child_zone = ZoneId {
-                    monitor_idx: zone_id.monitor_idx,
-                    side: child_side.clone(),
-                };
-                self.zones.get(&child_zone).map_or(false, |e| !e.is_empty())
+        // Surface from parent zone, but only if no sibling descendant still occupies it.
+        if let Some(parent_leaf_id) = zone_id.leaf_id.immediate_parent() {
+            let siblings_occupied = self.zones.iter().any(|(k, e)| {
+                k.monitor_idx == zone_id.monitor_idx
+                    && parent_leaf_id.is_ancestor_of(&k.leaf_id)
+                    && k.leaf_id != zone_id.leaf_id
+                    && !e.is_empty()
             });
 
             if !siblings_occupied {
                 let parent_zone = ZoneId {
                     monitor_idx: zone_id.monitor_idx,
-                    side: parent_side,
+                    leaf_id: parent_leaf_id,
                 };
                 if let Some(zone_entries) = self.zones.get(&parent_zone) {
                     if let Some(entry) = zone_entries.last() {
@@ -433,6 +320,10 @@ pub struct TilingState {
     pre_maximize_geometry: Mutex<HashMap<String, (Rect, String)>>,
     /// Zone tracker for tab zone system
     zone_tracker: Mutex<ZoneTracker>,
+    /// Zone layouts per monitor (keyed by monitor name). Default: 50/50 two-column.
+    zone_layouts: Mutex<HashMap<String, ZoneLayout>>,
+    /// Saved layout before maximize (for tile restore).
+    pre_maximize_layout: Mutex<HashMap<String, ZoneLayout>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -492,7 +383,39 @@ impl TilingState {
             pre_maximize_geometry: Mutex::new(HashMap::new()),
             zone_tracker: Mutex::new(ZoneTracker::new()),
             zone_last_geometry: Mutex::new(HashMap::new()),
+            zone_layouts: Mutex::new(HashMap::new()),
+            pre_maximize_layout: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Save the current layout before maximize, so we can restore it.
+    fn save_pre_maximize_layout(&self, monitor_name: &str) {
+        let layouts = self.zone_layouts.lock().unwrap();
+        if let Some(layout) = layouts.get(monitor_name) {
+            let mut saved = self.pre_maximize_layout.lock().unwrap();
+            saved.insert(monitor_name.to_string(), layout.clone());
+        }
+    }
+
+    /// Restore the layout saved before maximize.
+    fn take_pre_maximize_layout(&self, monitor_name: &str) -> Option<ZoneLayout> {
+        let mut saved = self.pre_maximize_layout.lock().unwrap();
+        saved.remove(monitor_name)
+    }
+
+    /// Get the zone layout for a monitor, creating a default 50/50 two-column if missing.
+    pub fn get_or_create_layout(&self, monitor_name: &str) -> ZoneLayout {
+        let mut layouts = self.zone_layouts.lock().unwrap();
+        layouts
+            .entry(monitor_name.to_string())
+            .or_insert_with(|| ZoneLayout::two_column(0.5))
+            .clone()
+    }
+
+    /// Update the zone layout for a monitor.
+    pub fn set_layout(&self, monitor_name: &str, layout: ZoneLayout) {
+        let mut layouts = self.zone_layouts.lock().unwrap();
+        layouts.insert(monitor_name.to_string(), layout);
     }
 
     /// Get the last action for a window.
@@ -555,11 +478,11 @@ impl TilingState {
         window_id: &str,
         geometry: Rect,
     ) -> (Vec<String>, Vec<ZoneEntry>) {
-        let side = match ZoneSide::from_action(action) {
+        let leaf_id = match ZoneLeafId::from_action(action) {
             Some(s) => s,
             None => return (Vec::new(), Vec::new()),
         };
-        let zone_id = ZoneId { monitor_idx, side };
+        let zone_id = ZoneId { monitor_idx, leaf_id };
 
         // Find old zone before move (for auto-surface)
         let old_zone = {
@@ -599,11 +522,11 @@ impl TilingState {
 
     /// Place a window in a zone silently (no displacement) — used for startup scan.
     fn zone_place_silent(&self, monitor_idx: usize, action: &str, window_id: &str, geometry: Rect) {
-        let side = match ZoneSide::from_action(action) {
+        let leaf_id = match ZoneLeafId::from_action(action) {
             Some(s) => s,
             None => return,
         };
-        let zone_id = ZoneId { monitor_idx, side };
+        let zone_id = ZoneId { monitor_idx, leaf_id };
         let mut tracker = self.zone_tracker.lock().unwrap();
         tracker.place_window_silent(zone_id, window_id, action, geometry);
     }
@@ -638,7 +561,7 @@ impl TilingState {
         tracker.find_minimized_entry(windows)
     }
 
-    /// Get window IDs from zones that cover this window's zone (parents + children).
+    /// Get window IDs from zones that cover this window's zone (ancestors).
     /// Used to minimize overlapping windows when a window is surfaced.
     fn zone_get_overlapping(&self, window_id: &str) -> Vec<String> {
         let tracker = self.zone_tracker.lock().unwrap();
@@ -649,13 +572,11 @@ impl TilingState {
 
         let mut to_minimize = Vec::new();
 
-        // Check parent zones (e.g. surfacing TopRight should minimize Right)
-        for parent_side in zone_id.side.covering_parents() {
-            let parent_zone = ZoneId {
-                monitor_idx: zone_id.monitor_idx,
-                side: parent_side.clone(),
-            };
-            if let Some(entries) = tracker.zones.get(&parent_zone) {
+        // Check ancestor zones (e.g. surfacing R.T should minimize R)
+        for (k, entries) in &tracker.zones {
+            if k.monitor_idx == zone_id.monitor_idx
+                && k.leaf_id.is_ancestor_of(&zone_id.leaf_id)
+            {
                 for entry in entries {
                     if entry.window_id != window_id && !to_minimize.contains(&entry.window_id) {
                         to_minimize.push(entry.window_id.clone());
@@ -672,11 +593,7 @@ impl TilingState {
     fn zone_side_context(&self, window_id: &str) -> Option<&'static str> {
         let tracker = self.zone_tracker.lock().unwrap();
         let zone_id = tracker.find_zone(window_id)?;
-        match &zone_id.side {
-            ZoneSide::Left | ZoneSide::TopLeft | ZoneSide::BottomLeft => Some("left"),
-            ZoneSide::Right | ZoneSide::TopRight | ZoneSide::BottomRight => Some("right"),
-            ZoneSide::Maximize => None,
-        }
+        zone_id.leaf_id.side_context()
     }
 
     /// Get the top entry from every occupied zone (for resurface).
@@ -721,123 +638,6 @@ fn almost_maximize_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
         x: monitor.x + g,
         y: monitor.y + g,
         width: monitor.width - 2 * g,
-        height: monitor.height - 2 * g,
-    }
-}
-
-/// Calculate left-half snap geometry
-fn snap_left_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
-    let g = gap as i32;
-    Rect {
-        x: monitor.x + g,
-        y: monitor.y + g,
-        width: monitor.width / 2 - g - g / 2,
-        height: monitor.height - 2 * g,
-    }
-}
-
-/// Calculate right-half snap geometry
-fn snap_right_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
-    let g = gap as i32;
-    let half_w = monitor.width / 2;
-    Rect {
-        x: monitor.x + half_w + g / 2,
-        y: monitor.y + g,
-        width: monitor.width - half_w - g - g / 2,
-        height: monitor.height - 2 * g,
-    }
-}
-
-/// Calculate top-left quarter snap geometry
-fn snap_top_left_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
-    let g = gap as i32;
-    Rect {
-        x: monitor.x + g,
-        y: monitor.y + g,
-        width: monitor.width / 2 - g - g / 2,
-        height: monitor.height / 2 - g - g / 2,
-    }
-}
-
-/// Calculate top-right quarter snap geometry
-fn snap_top_right_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
-    let g = gap as i32;
-    let half_w = monitor.width / 2;
-    Rect {
-        x: monitor.x + half_w + g / 2,
-        y: monitor.y + g,
-        width: monitor.width - half_w - g - g / 2,
-        height: monitor.height / 2 - g - g / 2,
-    }
-}
-
-/// Calculate bottom-left quarter snap geometry
-fn snap_bottom_left_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
-    let g = gap as i32;
-    let half_h = monitor.height / 2;
-    Rect {
-        x: monitor.x + g,
-        y: monitor.y + half_h + g / 2,
-        width: monitor.width / 2 - g - g / 2,
-        height: monitor.height - half_h - g - g / 2,
-    }
-}
-
-/// Calculate bottom-right quarter snap geometry
-fn snap_bottom_right_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
-    let g = gap as i32;
-    let half_w = monitor.width / 2;
-    let half_h = monitor.height / 2;
-    Rect {
-        x: monitor.x + half_w + g / 2,
-        y: monitor.y + half_h + g / 2,
-        width: monitor.width - half_w - g - g / 2,
-        height: monitor.height - half_h - g - g / 2,
-    }
-}
-
-/// Calculate left two-thirds snap geometry
-fn snap_left_two_thirds_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
-    let g = gap as i32;
-    Rect {
-        x: monitor.x + g,
-        y: monitor.y + g,
-        width: monitor.width * 2 / 3 - g - g / 2,
-        height: monitor.height - 2 * g,
-    }
-}
-
-/// Calculate left one-third snap geometry
-fn snap_left_one_third_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
-    let g = gap as i32;
-    Rect {
-        x: monitor.x + g,
-        y: monitor.y + g,
-        width: monitor.width / 3 - g - g / 2,
-        height: monitor.height - 2 * g,
-    }
-}
-
-/// Calculate right two-thirds snap geometry
-fn snap_right_two_thirds_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
-    let g = gap as i32;
-    let one_third = monitor.width / 3;
-    Rect {
-        x: monitor.x + one_third + g / 2,
-        y: monitor.y + g,
-        width: monitor.width - one_third - g - g / 2,
-        height: monitor.height - 2 * g,
-    }
-}
-
-/// Calculate right one-third snap geometry
-fn snap_right_one_third_rect(monitor: &MonitorInfo, gap: u32) -> Rect {
-    let g = gap as i32;
-    let two_thirds = monitor.width * 2 / 3;
-    Rect {
-        x: monitor.x + two_thirds + g / 2,
-        y: monitor.y + g,
-        width: monitor.width - two_thirds - g - g / 2,
         height: monitor.height - 2 * g,
     }
 }
@@ -1038,21 +838,41 @@ pub async fn scan_existing_windows(
         let monitor = &monitors[mon_idx];
         let wrect = window_to_rect(window);
 
-        // Build all candidate zones and their geometries for this monitor
-        let candidates: Vec<(&str, Rect)> = vec![
+        // Build candidate zones from all ratio steps + quarters
+        let mut candidates: Vec<(&str, Rect)> = vec![
             ("almost_maximize", almost_maximize_rect(monitor, gap)),
             ("full_maximize", almost_maximize_rect(monitor, 1)),
-            ("snap_left", snap_left_rect(monitor, gap)),
-            ("snap_right", snap_right_rect(monitor, gap)),
-            ("snap_left_two_thirds", snap_left_two_thirds_rect(monitor, gap)),
-            ("snap_left_one_third", snap_left_one_third_rect(monitor, gap)),
-            ("snap_right_two_thirds", snap_right_two_thirds_rect(monitor, gap)),
-            ("snap_right_one_third", snap_right_one_third_rect(monitor, gap)),
-            ("snap_top_left", snap_top_left_rect(monitor, gap)),
-            ("snap_top_right", snap_top_right_rect(monitor, gap)),
-            ("snap_bottom_left", snap_bottom_left_rect(monitor, gap)),
-            ("snap_bottom_right", snap_bottom_right_rect(monitor, gap)),
         ];
+        // Add candidates for each ratio step
+        for &ratio in RATIO_STEPS {
+            let layout = ZoneLayout::two_column(ratio);
+            let rects = layout.compute_rects(monitor, gap);
+            let left_rect = rects[&ZoneLeafId("L".to_string())];
+            let right_rect = rects[&ZoneLeafId("R".to_string())];
+
+            candidates.push(("snap_left", left_rect));
+            candidates.push(("snap_right", right_rect));
+
+            // Quarter variants
+            let g = gap as i32;
+            let half_h = monitor.height / 2;
+            candidates.push(("snap_top_left", Rect {
+                x: left_rect.x, y: monitor.y + g,
+                width: left_rect.width, height: half_h - g - g / 2,
+            }));
+            candidates.push(("snap_bottom_left", Rect {
+                x: left_rect.x, y: monitor.y + half_h + g / 2,
+                width: left_rect.width, height: monitor.height - half_h - g - g / 2,
+            }));
+            candidates.push(("snap_top_right", Rect {
+                x: right_rect.x, y: monitor.y + g,
+                width: right_rect.width, height: half_h - g - g / 2,
+            }));
+            candidates.push(("snap_bottom_right", Rect {
+                x: right_rect.x, y: monitor.y + half_h + g / 2,
+                width: right_rect.width, height: monitor.height - half_h - g - g / 2,
+            }));
+        }
 
         // Also check width-preserving quarters (current width + half height)
         let half_h = monitor.height / 2;
@@ -1112,6 +932,58 @@ pub async fn scan_existing_windows(
         }
     }
 
+    // Infer layout ratios from detected window positions per monitor
+    for (mon_idx, monitor) in monitors.iter().enumerate() {
+        // Check if any window matched a non-0.5 ratio on this monitor
+        let actions: Vec<String> = windows
+            .iter()
+            .filter_map(|w| {
+                let (action, idx) = state.get_last_action(&w.id)?;
+                if idx == mon_idx {
+                    Some(action)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let has_halves = actions.iter().any(|a| a.contains("left") || a.contains("right"));
+        let has_maximize = actions.iter().any(|a| a == "almost_maximize" || a == "full_maximize");
+
+        if has_halves {
+            // Try to detect the ratio from left-side window width
+            let left_windows: Vec<&WindowInfo> = windows
+                .iter()
+                .filter(|w| {
+                    state
+                        .get_last_action(&w.id)
+                        .map(|(a, i)| i == mon_idx && a.contains("left"))
+                        .unwrap_or(false)
+                })
+                .collect();
+            if let Some(lw) = left_windows.first() {
+                let boundary = (lw.x + lw.width - monitor.x) as f64 / monitor.width as f64;
+                let ratio = RATIO_STEPS
+                    .iter()
+                    .min_by(|a, b| {
+                        ((**a) - boundary)
+                            .abs()
+                            .partial_cmp(&((**b) - boundary).abs())
+                            .unwrap()
+                    })
+                    .copied()
+                    .unwrap_or(0.5);
+                state.set_layout(&monitor.name, ZoneLayout::two_column(ratio));
+                log::info!(
+                    "Startup scan: inferred layout ratio {:.3} for monitor '{}'",
+                    ratio, monitor.name
+                );
+            }
+        } else if has_maximize {
+            state.set_layout(&monitor.name, ZoneLayout::single());
+        }
+    }
+
     log::info!("Startup scan complete: {matched}/{} windows matched zones", windows.len());
     Ok(())
 }
@@ -1138,7 +1010,7 @@ async fn auto_tab_after_snap(
 
     if config.auto_surface_tabs {
         for entry in &surface {
-            surface_zone_entry(wm, state, entry).await?;
+            surface_zone_entry(wm, state, entry, config.gap_size).await?;
         }
     }
 
@@ -1151,6 +1023,7 @@ pub async fn surface_zone_entry(
     wm: &KWinBackend,
     state: &TilingState,
     entry: &ZoneEntry,
+    gap: u32,
 ) -> Result<(), String> {
     log::info!("Auto-surface: restoring {} from vacated zone", entry.window_id);
 
@@ -1163,13 +1036,29 @@ pub async fn surface_zone_entry(
         }
     }
 
+    // Compute the current zone rect from the layout tree instead of using stale geometry.
+    let current_rect = if let Some(leaf_id) = ZoneLeafId::from_action(&entry.snap_action) {
+        let mon_idx = state.get_last_action(&entry.window_id).map(|(_, i)| i).unwrap_or(0);
+        let monitors = wm.get_monitors().await.unwrap_or_default();
+        if let Some(monitor) = monitors.get(mon_idx) {
+            let layout = state.get_or_create_layout(&monitor.name);
+            let rects = layout.compute_rects(monitor, gap);
+            rects.get(&leaf_id).copied()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let rect = current_rect.unwrap_or(entry.geometry);
+
     wm.unminimize_window(&entry.window_id).await?;
     wm.move_window(
         &entry.window_id,
-        entry.geometry.x,
-        entry.geometry.y,
-        entry.geometry.width,
-        entry.geometry.height,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
     )
     .await?;
     Ok(())
@@ -1201,83 +1090,126 @@ pub async fn resurface_all_zones(
     Ok(())
 }
 
-// --- Snap spectrum: bidirectional size cycling ---
+// --- Layout-based ratio stepping ---
 
-/// Ordered snap spectrum: leftmost to rightmost
-const SNAP_SPECTRUM: &[&str] = &[
-    "snap_left_one_third",    // 0
-    "snap_left",              // 1
-    "snap_left_two_thirds",   // 2
-    "almost_maximize",        // 3
-    "snap_right_two_thirds",  // 4
-    "snap_right",             // 5
-    "snap_right_one_third",   // 6
-];
+/// Preset ratios for the vertical split boundary.
+/// Maps to old spectrum: [L1/3, L1/2, L2/3] = [R2/3, R1/2, R1/3].
+const RATIO_STEPS: &[f64] = &[1.0 / 3.0, 0.5, 2.0 / 3.0];
 
-fn spectrum_index(action: &str) -> Option<usize> {
-    SNAP_SPECTRUM.iter().position(|&a| a == action)
+/// Find the closest ratio step index for a given ratio.
+fn find_ratio_index(ratio: f64) -> Option<usize> {
+    RATIO_STEPS
+        .iter()
+        .position(|&r| (r - ratio).abs() < 0.05)
 }
 
-fn spectrum_rect(index: usize, monitor: &MonitorInfo, gap: u32) -> Rect {
-    match SNAP_SPECTRUM[index] {
-        "snap_left_one_third" => snap_left_one_third_rect(monitor, gap),
-        "snap_left" => snap_left_rect(monitor, gap),
-        "snap_left_two_thirds" => snap_left_two_thirds_rect(monitor, gap),
-        "almost_maximize" => almost_maximize_rect(monitor, gap),
-        "snap_right_two_thirds" => snap_right_two_thirds_rect(monitor, gap),
-        "snap_right" => snap_right_rect(monitor, gap),
-        "snap_right_one_third" => snap_right_one_third_rect(monitor, gap),
-        _ => unreachable!(),
+/// Step the ratio up (increase) or down (decrease) through RATIO_STEPS.
+/// Returns None if at the boundary.
+fn step_ratio(current: f64, up: bool) -> Option<f64> {
+    let idx = find_ratio_index(current).unwrap_or(1);
+    if up {
+        RATIO_STEPS.get(idx + 1).copied()
+    } else {
+        idx.checked_sub(1).and_then(|i| RATIO_STEPS.get(i).copied())
     }
 }
 
-/// Determine current spectrum index from geometry match, then last_action fallback.
-fn find_current_spectrum_index(
-    current_rect: &Rect,
-    last_action_name: &Option<String>,
-    mon_idx: usize,
-    state: &TilingState,
-    window: &WindowInfo,
-    monitor: &MonitorInfo,
-    gap: u32,
-) -> Option<usize> {
-    // Try geometry match first
-    for (i, _) in SNAP_SPECTRUM.iter().enumerate() {
-        let rect = spectrum_rect(i, monitor, gap);
-        if rects_approx_equal(current_rect, &rect) {
-            return Some(i);
-        }
-    }
-
-    // Fall back to last_action (handles smart-space positions that don't match standard geometry)
-    let on_same_monitor = state
-        .get_last_action(&window.id)
-        .map(|(_, m)| m == mon_idx)
-        .unwrap_or(false);
-    if on_same_monitor {
-        if let Some(action) = last_action_name.as_deref() {
-            return spectrum_index(action);
-        }
-    }
-
-    None
-}
-
-/// Determine spectrum index for a quarter by matching x and width only (ignoring y/height).
-fn find_quarter_spectrum_index(
-    current_rect: &Rect,
-    monitor: &MonitorInfo,
-    gap: u32,
-) -> Option<usize> {
-    for i in 0..SNAP_SPECTRUM.len() {
-        let rect = spectrum_rect(i, monitor, gap);
-        if (current_rect.x - rect.x).abs() <= 15
-            && (current_rect.width - rect.width).abs() <= 15
+/// Get the root vertical split ratio from a layout, if it has one.
+fn get_root_v_ratio(layout: &ZoneLayout) -> Option<f64> {
+    match &layout.root {
+        ZoneNode::Split { split, .. }
+            if split.axis == crate::zone_layout::SplitAxis::Vertical =>
         {
-            return Some(i);
+            Some(split.ratio)
+        }
+        _ => None,
+    }
+}
+
+use crate::zone_layout::ZoneNode;
+
+/// Detect which side (if any) has a horizontal split in a two-column layout.
+/// Returns ("left", h_ratio), ("right", h_ratio), or None.
+fn get_horizontal_split_side(layout: &ZoneLayout) -> Option<(&'static str, f64)> {
+    match &layout.root {
+        ZoneNode::Split { split, first, second, .. }
+            if split.axis == crate::zone_layout::SplitAxis::Vertical =>
+        {
+            if let ZoneNode::Split { split: h_split, .. } = first.as_ref() {
+                if h_split.axis == crate::zone_layout::SplitAxis::Horizontal {
+                    return Some(("left", h_split.ratio));
+                }
+            }
+            if let ZoneNode::Split { split: h_split, .. } = second.as_ref() {
+                if h_split.axis == crate::zone_layout::SplitAxis::Horizontal {
+                    return Some(("right", h_split.ratio));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Build a layout with the given vertical ratio, preserving any existing horizontal split.
+fn build_layout_preserving_splits(new_v_ratio: f64, old_layout: &ZoneLayout) -> ZoneLayout {
+    match get_horizontal_split_side(old_layout) {
+        Some(("left", h_ratio)) => ZoneLayout::left_split_and_right(new_v_ratio, h_ratio),
+        Some(("right", h_ratio)) => ZoneLayout::left_and_right_split(new_v_ratio, h_ratio),
+        _ => ZoneLayout::two_column(new_v_ratio),
+    }
+}
+
+/// Reconcile the layout tree with actual zone occupancy.
+/// If the layout has a horizontal split but no windows occupy the quarter zones,
+/// merge the split back to a simple leaf. This keeps the layout in sync when
+/// windows are zone-snapped or surfaced out of quarter positions.
+fn reconcile_layout(state: &TilingState, monitor_name: &str, mon_idx: usize) {
+    let layout = state.get_or_create_layout(monitor_name);
+    let h_split = get_horizontal_split_side(&layout);
+    if h_split.is_none() {
+        return; // No horizontal split to reconcile
+    }
+    let (split_side, _) = h_split.unwrap();
+
+    // Check if any tracked window is in a quarter zone on that side
+    let tracker = state.zone_tracker.lock().unwrap();
+    let has_quarter_window = tracker.zones.iter().any(|(zone_id, entries)| {
+        if zone_id.monitor_idx != mon_idx || entries.is_empty() {
+            return false;
+        }
+        let leaf = &zone_id.leaf_id.0;
+        match split_side {
+            "left" => leaf == "L.T" || leaf == "L.B",
+            "right" => leaf == "R.T" || leaf == "R.B",
+            _ => false,
+        }
+    });
+    drop(tracker);
+
+    if !has_quarter_window {
+        // Also check last_action for windows that might not be in the tracker yet
+        let actions = state.last_action.lock().unwrap();
+        let has_quarter_action = actions.values().any(|(action, idx, _)| {
+            if *idx != mon_idx {
+                return false;
+            }
+            match split_side {
+                "left" => action == "snap_top_left" || action == "snap_bottom_left",
+                "right" => action == "snap_top_right" || action == "snap_bottom_right",
+                _ => false,
+            }
+        });
+
+        if !has_quarter_action {
+            let v_ratio = get_root_v_ratio(&layout).unwrap_or(0.5);
+            log::info!(
+                "Reconcile layout: removing stale {} horizontal split on monitor {}",
+                split_side, monitor_name
+            );
+            state.set_layout(monitor_name, ZoneLayout::two_column(v_ratio));
         }
     }
-    None
 }
 
 /// Handle the almost-maximize action
@@ -1327,6 +1259,8 @@ pub async fn handle_maximize(
         let prev_action = last_action.as_deref().unwrap_or("unknown");
         wm.unmaximize_window(&window.id).await?;
         state.save_pre_maximize_geometry(&window.id, current_rect, prev_action);
+        state.save_pre_maximize_layout(&monitor.name);
+        state.set_layout(&monitor.name, ZoneLayout::single());
         wm.move_window(&window.id, almost_rect.x, almost_rect.y, almost_rect.width, almost_rect.height)
             .await?;
         state.set_last_action(&window.id, "almost_maximize", mon_idx);
@@ -1335,6 +1269,10 @@ pub async fn handle_maximize(
         // Full-size -> restore to tiled position (if saved), otherwise almost-maximize
         if let Some((tile_rect, tile_action)) = state.take_pre_maximize_geometry(&window.id) {
             log::info!("Action: full-size to tiled restore '{}' ({},{} {}x{})", tile_action, tile_rect.x, tile_rect.y, tile_rect.width, tile_rect.height);
+            // Restore the saved layout
+            if let Some(saved_layout) = state.take_pre_maximize_layout(&monitor.name) {
+                state.set_layout(&monitor.name, saved_layout);
+            }
             // Remove from the maximize zone before re-registering in the tile zone
             state.zone_find_and_remove(&window.id);
             wm.move_window(&window.id, tile_rect.x, tile_rect.y, tile_rect.width, tile_rect.height)
@@ -1364,6 +1302,8 @@ pub async fn handle_maximize(
         log::info!("Action: almost-maximize (saving tile action '{}')", prev_action);
         state.save_pre_snap_geometry(&window.id, current_rect);
         state.save_pre_maximize_geometry(&window.id, current_rect, prev_action);
+        state.save_pre_maximize_layout(&monitor.name);
+        state.set_layout(&monitor.name, ZoneLayout::single());
         wm.move_window(&window.id, almost_rect.x, almost_rect.y, almost_rect.width, almost_rect.height)
             .await?;
         state.set_last_action(&window.id, "almost_maximize", mon_idx);
@@ -1373,9 +1313,10 @@ pub async fn handle_maximize(
     Ok(())
 }
 
-/// Handle snap left/right action using the bidirectional snap spectrum.
-/// Left = step leftward through spectrum, Right = step rightward.
-/// At spectrum edges, crosses to adjacent monitor if one exists in that direction.
+/// Handle snap left/right using layout-based ratio stepping.
+/// Pressing Right always moves the boundary rightward (increases ratio).
+/// Pressing Left always moves the boundary leftward (decreases ratio).
+/// At ratio extremes: growing collapses to single zone, shrinking crosses monitors.
 pub async fn handle_snap(
     wm: &KWinBackend,
     config: &PaveConfig,
@@ -1398,175 +1339,235 @@ pub async fn handle_snap(
     let current_rect = window_to_rect(&window);
     let gap = config.gap_size;
 
-    // If currently in a quarter, left/right escapes to full half snap on that side
     let last_action_name = state
         .get_last_action(&window.id)
         .map(|(a, _)| a);
-    let is_quarter = matches!(
-        last_action_name.as_deref(),
-        Some("snap_top_left") | Some("snap_top_right")
-        | Some("snap_bottom_left") | Some("snap_bottom_right")
-    );
+    let current_leaf = last_action_name
+        .as_deref()
+        .and_then(ZoneLeafId::from_action);
 
-    if is_quarter {
-        let is_top = matches!(
-            last_action_name.as_deref(),
-            Some("snap_top_left") | Some("snap_top_right")
-        );
+    let is_left = current_leaf
+        .as_ref()
+        .map(|l| l.0.starts_with('L'))
+        .unwrap_or(false);
+    let is_right = current_leaf
+        .as_ref()
+        .map(|l| l.0.starts_with('R'))
+        .unwrap_or(false);
+    let is_root = current_leaf
+        .as_ref()
+        .map(|l| l.0 == "root")
+        .unwrap_or(false);
+    let is_quarter = current_leaf
+        .as_ref()
+        .map(|l| l.0.contains('.'))
+        .unwrap_or(false);
+    let in_spectrum = is_left || is_right || is_root;
 
-        // Try to find current width in the spectrum
-        let quarter_idx = find_quarter_spectrum_index(&current_rect, monitor, gap)
-            .or_else(|| {
-                // Fallback: if geometry doesn't match, infer from action name side
-                let is_left_quarter = matches!(
-                    last_action_name.as_deref(),
-                    Some("snap_top_left") | Some("snap_bottom_left")
-                );
-                Some(if is_left_quarter { 1 } else { 5 }) // default to 1/2 width
-            });
+    // Fresh snap — not in any known zone
+    if !in_spectrum {
+        state.save_pre_snap_geometry(&window.id, current_rect);
 
-        if let Some(idx) = quarter_idx {
-            let new_idx_i32 = match side {
-                SnapSide::Right => idx as i32 + 1,
-                SnapSide::Left => idx as i32 - 1,
-            };
+        let leaf_id = match side {
+            SnapSide::Left => ZoneLeafId("L".to_string()),
+            SnapSide::Right => ZoneLeafId("R".to_string()),
+        };
+        let action = leaf_id.to_action();
 
-            if new_idx_i32 < 0 || new_idx_i32 >= SNAP_SPECTRUM.len() as i32 {
-                // Edge of spectrum — try monitor crossing (as quarter)
-                let direction = match side {
-                    SnapSide::Right => Direction::Right,
-                    SnapSide::Left => Direction::Left,
-                };
-                if let Some(next_mon_idx) = find_monitor_in_direction(
-                    mon_idx, &monitors, &config.excluded_monitors, direction,
-                ) {
-                    let entry_idx = match side {
-                        SnapSide::Right => 0,
-                        SnapSide::Left => SNAP_SPECTRUM.len() - 1,
-                    };
-                    let next_monitor = &monitors[next_mon_idx];
-                    let spectrum_r = spectrum_rect(entry_idx, next_monitor, gap);
-                    let g = gap as i32;
-                    let half_h = next_monitor.height / 2;
-                    let quarter_rect = if is_top {
-                        Rect { x: spectrum_r.x, y: next_monitor.y + g, width: spectrum_r.width, height: half_h - g - g / 2 }
-                    } else {
-                        Rect { x: spectrum_r.x, y: next_monitor.y + half_h + g / 2, width: spectrum_r.width, height: next_monitor.height - half_h - g - g / 2 }
-                    };
-                    let new_is_left = entry_idx < 3;
-                    let action = match (is_top, new_is_left) {
-                        (true, true) => "snap_top_left",
-                        (true, false) => "snap_top_right",
-                        (false, true) => "snap_bottom_left",
-                        (false, false) => "snap_bottom_right",
-                    };
-                    wm.move_window(&window.id, quarter_rect.x, quarter_rect.y, quarter_rect.width, quarter_rect.height).await?;
-                    state.set_last_action(&window.id, action, next_mon_idx);
-                    auto_tab_after_snap(wm, config, state, &window.id, action, next_mon_idx, quarter_rect).await?;
+        // Try smart space first, fall back to standard half
+        let final_rect = if let Some(smart_rect) =
+            find_empty_space(side, monitor, &windows, &window.id, gap)
+        {
+            // Set layout ratio based on smart space
+            let boundary = (smart_rect.x + smart_rect.width - monitor.x) as f64
+                / monitor.width as f64;
+            let ratio = match side {
+                SnapSide::Left => boundary,
+                SnapSide::Right => {
+                    (smart_rect.x - monitor.x) as f64 / monitor.width as f64
                 }
-                // else: no monitor in that direction, no-op
-            } else {
-                // Stay in quarter mode, adjust width
-                let new_idx = new_idx_i32 as usize;
-                let spectrum_r = spectrum_rect(new_idx, monitor, gap);
-                let g = gap as i32;
-                let half_h = monitor.height / 2;
-                let quarter_rect = if is_top {
-                    Rect { x: spectrum_r.x, y: monitor.y + g, width: spectrum_r.width, height: half_h - g - g / 2 }
-                } else {
-                    Rect { x: spectrum_r.x, y: monitor.y + half_h + g / 2, width: spectrum_r.width, height: monitor.height - half_h - g - g / 2 }
-                };
-                let new_is_left = new_idx < 3;
-                let action = match (is_top, new_is_left) {
-                    (true, true) => "snap_top_left",
-                    (true, false) => "snap_top_right",
-                    (false, true) => "snap_bottom_left",
-                    (false, false) => "snap_bottom_right",
-                };
-                wm.move_window(&window.id, quarter_rect.x, quarter_rect.y, quarter_rect.width, quarter_rect.height).await?;
-                state.set_last_action(&window.id, action, mon_idx);
-                auto_tab_after_snap(wm, config, state, &window.id, action, mon_idx, quarter_rect).await?;
-                cooperative_resize(wm, config, state, &window.id, &quarter_rect, monitor, mon_idx).await?;
-            }
-        }
+            };
+            // Snap to nearest step
+            let ratio = RATIO_STEPS
+                .iter()
+                .min_by(|a, b| {
+                    ((**a) - ratio)
+                        .abs()
+                        .partial_cmp(&((**b) - ratio).abs())
+                        .unwrap()
+                })
+                .copied()
+                .unwrap_or(0.5);
+            state.set_layout(&monitor.name, ZoneLayout::two_column(ratio));
+            smart_rect
+        } else {
+            let layout = ZoneLayout::two_column(0.5);
+            let rects = layout.compute_rects(monitor, gap);
+            let rect = match rects.get(&leaf_id) {
+                Some(r) => *r,
+                None => {
+                    log::warn!("Fresh snap: leaf {:?} not found in layout, falling back to action_to_rect", leaf_id.0);
+                    action_to_rect(&leaf_id.to_action(), monitor, gap)
+                }
+            };
+            state.set_layout(&monitor.name, layout);
+            rect
+        };
 
+        wm.move_window(
+            &window.id,
+            final_rect.x,
+            final_rect.y,
+            final_rect.width,
+            final_rect.height,
+        )
+        .await?;
+        state.set_last_action(&window.id, &action, mon_idx);
+        auto_tab_after_snap(wm, config, state, &window.id, &action, mon_idx, final_rect)
+            .await?;
+        cooperative_resize_from_layout(wm, state, &window.id, monitor, mon_idx, gap).await?;
         return Ok(());
     }
 
-    // Try to find current position in spectrum
-    let current_index = find_current_spectrum_index(
-        &current_rect, &last_action_name, mon_idx, state, &window, monitor, gap,
-    );
+    // From single zone (almost maximize): break out into two-column
+    if is_root {
+        let (leaf_id, ratio) = match side {
+            SnapSide::Right => (ZoneLeafId("R".to_string()), 1.0 / 3.0),
+            SnapSide::Left => (ZoneLeafId("L".to_string()), 2.0 / 3.0),
+        };
+        let layout = ZoneLayout::two_column(ratio);
+        let rects = layout.compute_rects(monitor, gap);
+        let rect = rects.get(&leaf_id).copied().unwrap_or_else(|| action_to_rect(&leaf_id.to_action(), monitor, gap));
+        state.set_layout(&monitor.name, layout);
 
-    match current_index {
-        Some(idx) => {
-            // Step in the pressed direction
-            let new_idx = match side {
-                SnapSide::Right => idx as i32 + 1,
-                SnapSide::Left => idx as i32 - 1,
+        let action = leaf_id.to_action();
+        wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height)
+            .await?;
+        state.set_last_action(&window.id, &action, mon_idx);
+        auto_tab_after_snap(wm, config, state, &window.id, &action, mon_idx, rect).await?;
+        cooperative_resize_from_layout(wm, state, &window.id, monitor, mon_idx, gap).await?;
+        return Ok(());
+    }
+
+    // In L or R zone: step the ratio
+    let layout = state.get_or_create_layout(&monitor.name);
+    // If the layout is single (no split), treat it as a 0.5 two-column for stepping purposes
+    let layout = if get_root_v_ratio(&layout).is_none() {
+        ZoneLayout::two_column(0.5)
+    } else {
+        layout
+    };
+    let current_ratio = get_root_v_ratio(&layout).unwrap_or(0.5);
+    let step_up = side == SnapSide::Right;
+
+    // Determine if this step grows or shrinks the window's zone
+    let growing = (is_left && step_up) || (is_right && !step_up);
+
+    if let Some(new_ratio) = step_ratio(current_ratio, step_up) {
+        // Step to new ratio, preserving any existing horizontal splits
+        let new_layout = build_layout_preserving_splits(new_ratio, &layout);
+        state.set_layout(&monitor.name, new_layout.clone());
+
+        let rects = new_layout.compute_rects(monitor, gap);
+        let my_leaf = current_leaf.as_ref().unwrap();
+        let rect = rects.get(my_leaf).copied()
+            .unwrap_or_else(|| action_to_rect(&my_leaf.to_action(), monitor, gap));
+        let action = my_leaf.to_action();
+
+        wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height)
+            .await?;
+        state.set_last_action(&window.id, &action, mon_idx);
+        auto_tab_after_snap(wm, config, state, &window.id, &action, mon_idx, rect).await?;
+        cooperative_resize_from_layout(wm, state, &window.id, monitor, mon_idx, gap).await?;
+    } else if growing && !is_quarter {
+        // At growth limit for a full-height zone → collapse to single zone (almost maximize)
+        // Quarter zones should NOT collapse to maximize — they stay at their quarter size.
+        state.set_layout(&monitor.name, ZoneLayout::single());
+        let almost_rect = almost_maximize_rect(monitor, gap);
+        wm.move_window(
+            &window.id,
+            almost_rect.x,
+            almost_rect.y,
+            almost_rect.width,
+            almost_rect.height,
+        )
+        .await?;
+        state.set_last_action(&window.id, "almost_maximize", mon_idx);
+        auto_tab_after_snap(
+            wm,
+            config,
+            state,
+            &window.id,
+            "almost_maximize",
+            mon_idx,
+            almost_rect,
+        )
+        .await?;
+    } else {
+        // At shrink limit → cross to adjacent monitor
+        let direction = match side {
+            SnapSide::Right => Direction::Right,
+            SnapSide::Left => Direction::Left,
+        };
+        if let Some(next_mon_idx) = find_monitor_in_direction(
+            mon_idx,
+            &monitors,
+            &config.excluded_monitors,
+            direction,
+        ) {
+            let next_monitor = &monitors[next_mon_idx];
+            // Enter opposite side on new monitor at 1/3 ratio
+            let (leaf_id, ratio) = match side {
+                SnapSide::Right => (ZoneLeafId("L".to_string()), 1.0 / 3.0),
+                SnapSide::Left => (ZoneLeafId("R".to_string()), 2.0 / 3.0),
             };
+            let new_layout = ZoneLayout::two_column(ratio);
+            let rects = new_layout.compute_rects(next_monitor, gap);
 
-            if new_idx >= 0 && new_idx < SNAP_SPECTRUM.len() as i32 {
-                // Move within current monitor
-                let new_idx = new_idx as usize;
-                let action = SNAP_SPECTRUM[new_idx];
-                let rect = spectrum_rect(new_idx, monitor, gap);
-                wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height).await?;
-                state.set_last_action(&window.id, action, mon_idx);
-                auto_tab_after_snap(wm, config, state, &window.id, action, mon_idx, rect).await?;
-                cooperative_resize(wm, config, state, &window.id, &rect, monitor, mon_idx).await?;
-            } else {
-                // Edge of spectrum — try crossing to adjacent monitor
-                let direction = match side {
-                    SnapSide::Right => Direction::Right,
-                    SnapSide::Left => Direction::Left,
+            // If in a quarter, preserve the quarter on the new monitor
+            let (rect, action) = if is_quarter {
+                let is_top = current_leaf
+                    .as_ref()
+                    .map(|l| l.0.ends_with(".T"))
+                    .unwrap_or(false);
+                let new_leaf = match (is_top, &leaf_id.0 == "L") {
+                    (true, true) => ZoneLeafId("L.T".to_string()),
+                    (true, false) => ZoneLeafId("R.T".to_string()),
+                    (false, true) => ZoneLeafId("L.B".to_string()),
+                    (false, false) => ZoneLeafId("R.B".to_string()),
                 };
-                if let Some(next_mon_idx) = find_monitor_in_direction(
-                    mon_idx, &monitors, &config.excluded_monitors, direction,
-                ) {
-                    // Enter the opposite end of the spectrum on the new monitor
-                    let entry_idx = match side {
-                        SnapSide::Right => 0,  // Enter at L1/3
-                        SnapSide::Left => SNAP_SPECTRUM.len() - 1,  // Enter at R1/3
-                    };
-                    let next_monitor = &monitors[next_mon_idx];
-                    let action = SNAP_SPECTRUM[entry_idx];
-                    let rect = spectrum_rect(entry_idx, next_monitor, gap);
-                    wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height).await?;
-                    state.set_last_action(&window.id, action, next_mon_idx);
-                    auto_tab_after_snap(wm, config, state, &window.id, action, next_mon_idx, rect).await?;
-                }
-                // else: no monitor in that direction, no-op
-            }
-        }
-        None => {
-            // Fresh snap — not currently in any spectrum position
-            state.save_pre_snap_geometry(&window.id, current_rect);
-
-            let action_name = match side {
-                SnapSide::Left => "snap_left",
-                SnapSide::Right => "snap_right",
-            };
-
-            // Try smart space first, fall back to standard half
-            let final_rect = if let Some(smart_rect) = find_empty_space(
-                side, monitor, &windows, &window.id, gap,
-            ) {
-                wm.move_window(&window.id, smart_rect.x, smart_rect.y, smart_rect.width, smart_rect.height).await?;
-                smart_rect
-            } else {
-                let rect = match side {
-                    SnapSide::Left => snap_left_rect(monitor, gap),
-                    SnapSide::Right => snap_right_rect(monitor, gap),
+                // Use the half-width rect but adjust height for quarter
+                let half_rect = rects.get(&leaf_id).copied().unwrap_or_else(|| action_to_rect(&leaf_id.to_action(), next_monitor, gap));
+                let g = gap as i32;
+                let half_h = next_monitor.height / 2;
+                let qrect = if is_top {
+                    Rect {
+                        x: half_rect.x,
+                        y: next_monitor.y + g,
+                        width: half_rect.width,
+                        height: half_h - g - g / 2,
+                    }
+                } else {
+                    Rect {
+                        x: half_rect.x,
+                        y: next_monitor.y + half_h + g / 2,
+                        width: half_rect.width,
+                        height: next_monitor.height - half_h - g - g / 2,
+                    }
                 };
-                wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height).await?;
-                rect
+                (qrect, new_leaf.to_action())
+            } else {
+                (rects.get(&leaf_id).copied().unwrap_or_else(|| action_to_rect(&leaf_id.to_action(), next_monitor, gap)), leaf_id.to_action())
             };
 
-            state.set_last_action(&window.id, action_name, mon_idx);
-            auto_tab_after_snap(wm, config, state, &window.id, action_name, mon_idx, final_rect).await?;
-            cooperative_resize(wm, config, state, &window.id, &final_rect, monitor, mon_idx).await?;
+            state.set_layout(&next_monitor.name, new_layout);
+            wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height)
+                .await?;
+            state.set_last_action(&window.id, &action, next_mon_idx);
+            auto_tab_after_snap(wm, config, state, &window.id, &action, next_mon_idx, rect)
+                .await?;
         }
+        // else: no monitor in that direction, no-op
     }
 
     Ok(())
@@ -1644,12 +1645,34 @@ pub async fn handle_snap_vertical(
                 ("right", SnapVertical::Down) => "snap_top_right",
                 _ => unreachable!(),
             };
-            let target_rect = match target_action {
-                "snap_top_left" => snap_top_left_rect(next_monitor, config.gap_size),
-                "snap_top_right" => snap_top_right_rect(next_monitor, config.gap_size),
-                "snap_bottom_left" => snap_bottom_left_rect(next_monitor, config.gap_size),
-                "snap_bottom_right" => snap_bottom_right_rect(next_monitor, config.gap_size),
-                _ => unreachable!(),
+            // Compute quarter rect from the next monitor's layout
+            let next_layout = state.get_or_create_layout(&next_monitor.name);
+            let next_rects = next_layout.compute_rects(next_monitor, config.gap_size);
+            let parent_leaf = if target_action.contains("left") {
+                ZoneLeafId("L".to_string())
+            } else {
+                ZoneLeafId("R".to_string())
+            };
+            let half_rect = next_rects
+                .get(&parent_leaf)
+                .copied()
+                .unwrap_or_else(|| action_to_rect(target_action, next_monitor, config.gap_size));
+            let g2 = config.gap_size as i32;
+            let half_h2 = next_monitor.height / 2;
+            let target_rect = if target_action.contains("top") {
+                Rect {
+                    x: half_rect.x,
+                    y: next_monitor.y + g2,
+                    width: half_rect.width,
+                    height: half_h2 - g2 - g2 / 2,
+                }
+            } else {
+                Rect {
+                    x: half_rect.x,
+                    y: next_monitor.y + half_h2 + g2 / 2,
+                    width: half_rect.width,
+                    height: next_monitor.height - half_h2 - g2 - g2 / 2,
+                }
             };
             wm.move_window(&window.id, target_rect.x, target_rect.y, target_rect.width, target_rect.height).await?;
             state.set_last_action(&window.id, target_action, next_mon_idx);
@@ -1664,22 +1687,30 @@ pub async fn handle_snap_vertical(
     let g = gap as i32;
     let current_rect = window_to_rect(&window);
     let half_h = monitor.height / 2;
+    let layout = state.get_or_create_layout(&monitor.name);
 
-    // Quarter pressing opposite direction → go to full height first, preserving width
+    // Quarter pressing opposite direction → go to full height (merge back to parent)
     if (direction == SnapVertical::Down && is_already_top)
         || (direction == SnapVertical::Up && is_already_bottom)
     {
-        // Determine full-height action from horizontal spectrum position
-        let spectrum_idx = find_quarter_spectrum_index(&current_rect, monitor, gap);
-        let (target_action, target_rect) = if let Some(idx) = spectrum_idx {
-            (SNAP_SPECTRUM[idx], spectrum_rect(idx, monitor, gap))
-        } else {
-            // Fallback: standard half-width for the side
-            match side_context {
-                "left" => ("snap_left", snap_left_rect(monitor, gap)),
-                _ => ("snap_right", snap_right_rect(monitor, gap)),
-            }
+        // Merge the horizontal split back to a single leaf in the layout
+        let v_ratio = get_root_v_ratio(&layout).unwrap_or(0.5);
+        let new_layout = ZoneLayout::two_column(v_ratio);
+        state.set_layout(&monitor.name, new_layout.clone());
+
+        let parent_leaf = match side_context {
+            "left" => ZoneLeafId("L".to_string()),
+            _ => ZoneLeafId("R".to_string()),
         };
+        let rects = new_layout.compute_rects(monitor, gap);
+        let target_rect = rects
+            .get(&parent_leaf)
+            .copied()
+            .unwrap_or_else(|| match side_context {
+                "left" => action_to_rect("snap_left", monitor, gap),
+                _ => action_to_rect("snap_right", monitor, gap),
+            });
+        let target_action = parent_leaf.to_action();
 
         log::info!(
             "Snap vertical: {} -> {} (quarter to full height) at ({},{} {}x{})",
@@ -1689,26 +1720,19 @@ pub async fn handle_snap_vertical(
         );
 
         wm.move_window(&window.id, target_rect.x, target_rect.y, target_rect.width, target_rect.height).await?;
-        state.set_last_action(&window.id, target_action, mon_idx);
-        auto_tab_after_snap(wm, config, state, &window.id, target_action, mon_idx, target_rect).await?;
+        state.set_last_action(&window.id, &target_action, mon_idx);
+        auto_tab_after_snap(wm, config, state, &window.id, &target_action, mon_idx, target_rect).await?;
         return Ok(());
     }
 
-    // Full height → quarter (preserve width and x)
-    let target_rect = match direction {
-        SnapVertical::Up => Rect {
-            x: current_rect.x,
-            y: monitor.y + g,
-            width: current_rect.width,
-            height: half_h - g - g / 2,
-        },
-        SnapVertical::Down => Rect {
-            x: current_rect.x,
-            y: monitor.y + half_h + g / 2,
-            width: current_rect.width,
-            height: monitor.height - half_h - g - g / 2,
-        },
+    // Full height → quarter: add horizontal split to the layout tree
+    let v_ratio = get_root_v_ratio(&layout).unwrap_or(0.5);
+    let new_layout = if side_context == "left" {
+        ZoneLayout::left_split_and_right(v_ratio, 0.5)
+    } else {
+        ZoneLayout::left_and_right_split(v_ratio, 0.5)
     };
+    state.set_layout(&monitor.name, new_layout.clone());
 
     let target_action = match (side_context, direction) {
         ("left", SnapVertical::Up) => "snap_top_left",
@@ -1717,6 +1741,13 @@ pub async fn handle_snap_vertical(
         ("right", SnapVertical::Down) => "snap_bottom_right",
         _ => unreachable!(),
     };
+
+    let leaf_id = ZoneLeafId::from_action(target_action).unwrap();
+    let rects = new_layout.compute_rects(monitor, gap);
+    let target_rect = rects
+        .get(&leaf_id)
+        .copied()
+        .unwrap_or_else(|| action_to_rect(target_action, monitor, gap));
 
     log::info!(
         "Snap vertical: {} -> {} at ({},{} {}x{})",
@@ -1769,7 +1800,7 @@ pub async fn handle_restore(
                 if config.auto_surface_tabs {
                     for entry in &entries {
                         log::info!("Restore: surfacing tabbed window {}", entry.window_id);
-                        surface_zone_entry(wm, state, entry).await?;
+                        surface_zone_entry(wm, state, entry, config.gap_size).await?;
                     }
                 }
             }
@@ -2170,6 +2201,7 @@ fn calculate_adjacent_resize(
 pub async fn handle_resize_event(
     wm: &KWinBackend,
     config: &PaveConfig,
+    state: &TilingState,
     event: &ResizeEvent,
 ) -> Result<(), String> {
     let edge = match detect_resized_edge(&event.old_geometry, &event.new_geometry) {
@@ -2346,82 +2378,108 @@ pub async fn handle_resize_event(
         );
     }
 
+    // Infer the new vertical split ratio from the resized window and update the layout.
+    // This ensures that subsequent snaps and cooperative resizes use the dragged boundary.
+    if matches!(edge, ResizedEdge::Left | ResizedEdge::Right) {
+        let gap = config.gap_size;
+        let usable_width = monitor.width - gap as i32;
+        // The right edge of the left zone determines the ratio
+        let left_zone_right = if matches!(edge, ResizedEdge::Right) {
+            // The resized window is on the left side — its new right edge
+            event.new_geometry.x + event.new_geometry.width
+        } else {
+            // The resized window is on the right side — use the adjacent window's right edge,
+            // or compute from the new left edge minus the gap
+            event.new_geometry.x - gap as i32
+        };
+        let left_zone_width = left_zone_right - monitor.x - gap as i32;
+        // The left zone width = usable_width * ratio - gap/2, so:
+        // ratio = (left_zone_width + gap/2) / usable_width
+        let half_gap = gap as f64 / 2.0;
+        let ratio = (left_zone_width as f64 + half_gap) / usable_width as f64;
+        let ratio = ratio.clamp(0.2, 0.8);
+
+        let mut layouts = state.zone_layouts.lock().unwrap();
+        let layout = layouts
+            .entry(monitor.name.clone())
+            .or_insert_with(|| ZoneLayout::two_column(0.5));
+
+        // Only update if the layout is a simple two-column split
+        if get_root_v_ratio(layout).is_some() {
+            *layout = ZoneLayout::two_column(ratio);
+            log::info!(
+                "Resize event: updated layout ratio to {:.3} for monitor {}",
+                ratio,
+                monitor.name
+            );
+        }
+    }
+
     Ok(())
 }
 
-/// After a snap, resize adjacent visible windows on the same monitor so they
-/// fill the remaining space cooperatively (no overlap, no gaps).
-async fn cooperative_resize(
+/// After a layout ratio change, recompute all leaf rects from the layout and
+/// move every tracked window on this monitor to its new position.
+async fn cooperative_resize_from_layout(
     wm: &KWinBackend,
-    config: &PaveConfig,
     state: &TilingState,
     snapped_window_id: &str,
-    snapped_rect: &Rect,
     monitor: &MonitorInfo,
     mon_idx: usize,
+    gap: u32,
 ) -> Result<(), String> {
+    let layout = state.get_or_create_layout(&monitor.name);
+    let rects = layout.compute_rects(monitor, gap);
+
     let windows = wm.get_windows().await?;
-    let gap = config.gap_size;
-    let g = gap as i32;
 
     for w in &windows {
         if w.id == snapped_window_id || w.minimized || !is_window_on_monitor(w, monitor) {
             continue;
         }
 
-        let wrect = window_to_rect(w);
-        let mut new_rect = wrect;
-        let mut changed = false;
+        let action = match state.get_last_action(&w.id).map(|(a, _)| a) {
+            Some(a) => a,
+            None => continue,
+        };
 
-        // Check if this window is horizontally adjacent to the snapped window.
-        // They must share vertical overlap to be considered adjacent.
-        if !vertical_overlap(snapped_rect.y, snapped_rect.height, wrect.y, wrect.height) {
+        let leaf_id = match ZoneLeafId::from_action(&action) {
+            Some(l) => l,
+            None => continue,
+        };
+
+        // Look up the leaf rect directly from the layout tree
+        let target_rect = if let Some(rect) = rects.get(&leaf_id) {
+            *rect
+        } else {
+            // Quarter leaf not in layout (layout doesn't have horizontal split yet) — skip
             continue;
-        }
+        };
 
-        // Snapped window is on the left, this window is to its right
-        if snapped_rect.x < wrect.x {
-            let new_x = snapped_rect.x + snapped_rect.width + g;
-            let new_width = (monitor.x + monitor.width - g) - new_x;
-            if new_width > 100 {
-                new_rect.x = new_x;
-                new_rect.width = new_width;
-                changed = true;
-            }
-        }
-        // Snapped window is on the right, this window is to its left
-        else if snapped_rect.x > wrect.x {
-            let new_width = (snapped_rect.x - g) - (monitor.x + g);
-            if new_width > 100 {
-                new_rect.x = monitor.x + g;
-                new_rect.width = new_width;
-                changed = true;
-            }
-        }
-
-        if changed {
+        let wrect = window_to_rect(w);
+        if !rects_approx_equal(&wrect, &target_rect) {
             log::info!(
                 "Cooperative resize: '{}' -> ({},{} {}x{})",
-                w.title, new_rect.x, new_rect.y, new_rect.width, new_rect.height
+                w.title, target_rect.x, target_rect.y, target_rect.width, target_rect.height
             );
-            wm.move_window(&w.id, new_rect.x, new_rect.y, new_rect.width, new_rect.height)
-                .await?;
+            wm.move_window(
+                &w.id,
+                target_rect.x,
+                target_rect.y,
+                target_rect.width,
+                target_rect.height,
+            )
+            .await?;
 
-            // Update the zone tracker with the new geometry
-            let action = state
-                .get_last_action(&w.id)
-                .map(|(a, _)| a)
-                .unwrap_or_default();
-            if !action.is_empty() {
-                if let Some(side) = ZoneSide::from_action(&action) {
-                    let zone_id = ZoneId { monitor_idx: mon_idx, side };
-                    let mut tracker = state.zone_tracker.lock().unwrap();
-                    // Update the geometry in the existing zone entry
-                    if let Some(entries) = tracker.zones.get_mut(&zone_id) {
-                        if let Some(entry) = entries.iter_mut().find(|e| e.window_id == w.id) {
-                            entry.geometry = new_rect;
-                        }
-                    }
+            // Update the zone tracker geometry
+            let zone_id = ZoneId {
+                monitor_idx: mon_idx,
+                leaf_id: leaf_id.clone(),
+            };
+            let mut tracker = state.zone_tracker.lock().unwrap();
+            if let Some(entries) = tracker.zones.get_mut(&zone_id) {
+                if let Some(entry) = entries.iter_mut().find(|e| e.window_id == w.id) {
+                    entry.geometry = target_rect;
                 }
             }
         }
@@ -2430,31 +2488,73 @@ async fn cooperative_resize(
     Ok(())
 }
 
-/// Map a ZoneSide to its canonical snap action name.
-fn zone_side_to_action(side: &ZoneSide) -> String {
-    match side {
-        ZoneSide::Left => "snap_left".to_string(),
-        ZoneSide::Right => "snap_right".to_string(),
-        ZoneSide::TopLeft => "snap_top_left".to_string(),
-        ZoneSide::TopRight => "snap_top_right".to_string(),
-        ZoneSide::BottomLeft => "snap_bottom_left".to_string(),
-        ZoneSide::BottomRight => "snap_bottom_right".to_string(),
-        ZoneSide::Maximize => "almost_maximize".to_string(),
+/// Legacy adjacency fallback for zone snap. Covers cases that the BSP tree
+/// doesn't model (half-zone → quarter, quarter → quarter vertical).
+/// This will be removed once handle_snap_vertical updates the layout tree.
+fn legacy_adjacent(leaf_id: &ZoneLeafId, dir: Direction) -> Option<ZoneLeafId> {
+    let id = leaf_id.0.as_str();
+    match (id, dir) {
+        // Half zones: vertical → quarter
+        ("L", Direction::Down) => Some(ZoneLeafId("L.B".to_string())),
+        ("L", Direction::Up) => Some(ZoneLeafId("L.T".to_string())),
+        ("R", Direction::Down) => Some(ZoneLeafId("R.B".to_string())),
+        ("R", Direction::Up) => Some(ZoneLeafId("R.T".to_string())),
+        // Quarter zones: horizontal
+        ("L.T", Direction::Right) => Some(ZoneLeafId("R.T".to_string())),
+        ("R.T", Direction::Left) => Some(ZoneLeafId("L.T".to_string())),
+        ("L.B", Direction::Right) => Some(ZoneLeafId("R.B".to_string())),
+        ("R.B", Direction::Left) => Some(ZoneLeafId("L.B".to_string())),
+        // Quarter zones: vertical
+        ("L.T", Direction::Down) => Some(ZoneLeafId("L.B".to_string())),
+        ("L.B", Direction::Up) => Some(ZoneLeafId("L.T".to_string())),
+        ("R.T", Direction::Down) => Some(ZoneLeafId("R.B".to_string())),
+        ("R.B", Direction::Up) => Some(ZoneLeafId("R.T".to_string())),
+        _ => None,
     }
 }
 
 /// Map a snap action name to its standard geometry on a monitor.
+/// Uses a default 50/50 two-column layout to compute zone rects.
 fn action_to_rect(action: &str, monitor: &MonitorInfo, gap: u32) -> Rect {
-    match action {
-        "snap_left" => snap_left_rect(monitor, gap),
-        "snap_right" => snap_right_rect(monitor, gap),
-        "snap_top_left" => snap_top_left_rect(monitor, gap),
-        "snap_top_right" => snap_top_right_rect(monitor, gap),
-        "snap_bottom_left" => snap_bottom_left_rect(monitor, gap),
-        "snap_bottom_right" => snap_bottom_right_rect(monitor, gap),
-        "almost_maximize" | "full_maximize" => almost_maximize_rect(monitor, gap),
-        _ => almost_maximize_rect(monitor, gap),
+    if action == "almost_maximize" || action == "full_maximize" {
+        return almost_maximize_rect(monitor, gap);
     }
+
+    let layout = ZoneLayout::two_column(0.5);
+    let rects = layout.compute_rects(monitor, gap);
+
+    if let Some(leaf_id) = ZoneLeafId::from_action(action) {
+        // For quarter zones (e.g. snap_top_left), the layout only has L/R leaves.
+        // Compute the quarter from the parent half.
+        if let Some(rect) = rects.get(&leaf_id) {
+            return *rect;
+        }
+        // Quarter zone: get parent half, then split vertically
+        if let Some(parent) = leaf_id.immediate_parent() {
+            if let Some(half_rect) = rects.get(&parent) {
+                let g = gap as i32;
+                let half_h = monitor.height / 2;
+                let is_top = leaf_id.0.ends_with(".T");
+                return if is_top {
+                    Rect {
+                        x: half_rect.x,
+                        y: monitor.y + g,
+                        width: half_rect.width,
+                        height: half_h - g - g / 2,
+                    }
+                } else {
+                    Rect {
+                        x: half_rect.x,
+                        y: monitor.y + half_h + g / 2,
+                        width: half_rect.width,
+                        height: half_h - g - g / 2,
+                    }
+                };
+            }
+        }
+    }
+
+    almost_maximize_rect(monitor, gap)
 }
 
 /// Move the active window into an adjacent zone. The displaced window in the
@@ -2479,18 +2579,18 @@ pub async fn handle_zone_snap(
     let monitor = &monitors[mon_idx];
     let gap = config.gap_size;
 
-    // Determine the window's current zone
-    let current_side = {
+    // Determine the window's current zone leaf
+    let current_leaf_id = {
         let tracker = state.zone_tracker.lock().unwrap();
-        tracker.find_zone(&window.id).map(|z| z.side.clone())
+        tracker.find_zone(&window.id).map(|z| z.leaf_id.clone())
     };
 
-    let current_side = match current_side {
+    let current_leaf_id = match current_leaf_id {
         Some(s) => s,
         None => {
             // Try to infer from last_action
             let action = state.get_last_action(&window.id).map(|(a, _)| a);
-            match action.as_deref().and_then(ZoneSide::from_action) {
+            match action.as_deref().and_then(ZoneLeafId::from_action) {
                 Some(s) => s,
                 None => {
                     log::debug!("Zone snap: window not in any zone");
@@ -2500,8 +2600,18 @@ pub async fn handle_zone_snap(
         }
     };
 
-    // Find adjacent zone
-    let target_side = match current_side.adjacent(direction) {
+    // Find adjacent zone using the monitor's zone layout, with legacy fallback
+    let adj_dir = match direction {
+        Direction::Left => AdjacentDirection::Left,
+        Direction::Right => AdjacentDirection::Right,
+        Direction::Up => AdjacentDirection::Up,
+        Direction::Down => AdjacentDirection::Down,
+    };
+    let layout = state.get_or_create_layout(&monitor.name);
+    let target_leaf_id = match layout
+        .adjacent_leaf(&current_leaf_id, adj_dir)
+        .or_else(|| legacy_adjacent(&current_leaf_id, direction))
+    {
         Some(s) => s,
         None => {
             log::debug!("Zone snap: no adjacent zone in direction {:?}", direction);
@@ -2509,16 +2619,16 @@ pub async fn handle_zone_snap(
         }
     };
 
-    let target_action = zone_side_to_action(&target_side);
-    let source_action = zone_side_to_action(&current_side);
+    let target_action = target_leaf_id.to_action();
+    let source_action = current_leaf_id.to_action();
 
     let source_zone_id = ZoneId {
         monitor_idx: mon_idx,
-        side: current_side,
+        leaf_id: current_leaf_id,
     };
     let target_zone_id = ZoneId {
         monitor_idx: mon_idx,
-        side: target_side,
+        leaf_id: target_leaf_id,
     };
 
     // Check if the target zone is occupied — get the top entry's geometry
@@ -2534,11 +2644,16 @@ pub async fn handle_zone_snap(
     let target_zone_empty = target_top_entry.is_none();
 
     // Target geometry: use the existing zone occupant's geometry if present,
-    // otherwise fall back to standard geometry for that zone side
+    // otherwise compute from the layout tree
     let target_rect = target_top_entry
         .as_ref()
         .map(|e| e.geometry)
-        .unwrap_or_else(|| action_to_rect(&target_action, monitor, gap));
+        .unwrap_or_else(|| {
+            let rects = layout.compute_rects(monitor, gap);
+            rects.get(&target_zone_id.leaf_id)
+                .copied()
+                .unwrap_or_else(|| action_to_rect(&target_action, monitor, gap))
+        });
 
     // Save the source zone's geometry before we remove the window,
     // so we remember the zone's size if it becomes empty.
@@ -2647,18 +2762,23 @@ pub async fn handle_zone_snap(
         );
     }
 
-    // Surface the next window in the source zone if one exists
+    // Surface exactly one window in the vacated source zone (not descendants/parents).
+    // This prevents cascading surface operations that cause overlapping windows.
     if config.auto_surface_tabs {
-        let surface_entries = {
+        let surf_entry = {
             let tracker = state.zone_tracker.lock().unwrap();
-            tracker.collect_surface_entries(&source_zone_id)
+            tracker.zones.get(&source_zone_id)
+                .and_then(|entries| entries.last().cloned())
+                .filter(|e| e.window_id != window.id)
         };
-        for surf_entry in &surface_entries {
-            if surf_entry.window_id != window.id {
-                surface_zone_entry(wm, state, surf_entry).await?;
-            }
+        if let Some(entry) = surf_entry {
+            surface_zone_entry(wm, state, &entry, gap).await?;
         }
     }
+
+    // Reconcile the layout — if the window left a quarter zone and no other
+    // quarter windows remain, merge the horizontal split back.
+    reconcile_layout(state, &monitor.name, mon_idx);
 
     Ok(())
 }
