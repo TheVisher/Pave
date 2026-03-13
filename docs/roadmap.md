@@ -33,6 +33,15 @@ Pave is a zone-based window tiling manager that goes beyond snapping windows to 
 - [x] License file (MIT)
 - [x] Settings UI polish (current layout names, active preset indicator)
 - [ ] First-run onboarding (brief overlay showing shortcuts)
+- [ ] Migrate shortcuts from `Ctrl+Alt` to `Super+Alt` (see `docs/keybinds.md`)
+- [ ] Tray menu layout picker — visual thumbnails for common zone arrangements:
+  - 50/50 vertical, 50/50 horizontal
+  - 1/3 + 2/3 (left and right variants)
+  - Quarters
+  - Each with horizontal split variants
+- [ ] Cooperative resize — arrow keys resize zones, neighbors adjust (no overlap)
+- [ ] Zone snap — `Super+Alt+Shift+arrows` moves window into adjacent zone, displaced window joins tab stack
+- [ ] Direct zone focus — `Super+Alt+1/2/3` jumps to zone by index
 
 ---
 
