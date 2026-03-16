@@ -1,0 +1,15 @@
+[Unit]
+Description=Pave Zone-Based Window Tiler
+After=plasma-workspace.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/pave
+Restart=on-failure
+RestartSec=5
+Slice=session.slice
+Type=dbus
+BusName=org.kde.pave
+
+[Install]
+WantedBy=graphical-session.target
