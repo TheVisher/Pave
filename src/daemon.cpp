@@ -12,6 +12,9 @@
 #include <QDBusMessage>
 #include <QDBusReply>
 
+#include <QJsonDocument>
+#include <QJsonObject>
+
 #include <KGlobalAccel>
 #include <KConfig>
 #include <KConfigGroup>
@@ -65,6 +68,13 @@ void PaveDaemon::scanWindows()
 
 void PaveDaemon::refreshActiveWindow()
 {
+    // If windowActivated was called recently (e.g., from KWin event or D-Bus test),
+    // trust that data instead of querying KWin again. This prevents overwriting
+    // valid activation data with a stale KWin query result.
+    if (m_lastActivationTime.isValid() && m_lastActivationTime.elapsed() < ACTIVATION_SUPPRESS_MS) {
+        return;
+    }
+
     WindowInfo active = m_windowManager->activeWindow();
     if (!active.id.isEmpty()) {
         m_cachedActiveWindow = active;
@@ -373,8 +383,19 @@ void PaveDaemon::onMoveLeft()
         if (!layout.hasVerticalSplit()) {
             layout.stepVerticalRatio(false);
         }
+        // If the left column has an h-split, assign to the empty sub-zone
+        QString targetZone = QStringLiteral("L");
+        if (layout.hasHorizontalSplit(true)) {
+            QSet<QString> active = activeZonesOnMonitor(layoutKey, monitor);
+            bool topOccupied = active.contains(QStringLiteral("L.T"));
+            bool botOccupied = active.contains(QStringLiteral("L.B"));
+            if (topOccupied && !botOccupied)
+                targetZone = QStringLiteral("L.B");
+            else
+                targetZone = QStringLiteral("L.T");
+        }
         assignWindowToZone(win.id, win.appClass, monitor, desktop,
-                           QStringLiteral("L"), win.geometry);
+                           targetZone, win.geometry);
     } else {
         bool stepped = layout.stepVerticalRatio(false);
         if (!stepped) {
@@ -414,8 +435,19 @@ void PaveDaemon::onMoveRight()
         if (!layout.hasVerticalSplit()) {
             layout.stepVerticalRatio(true);
         }
+        // If the right column has an h-split, assign to the empty sub-zone
+        QString targetZone = QStringLiteral("R");
+        if (layout.hasHorizontalSplit(false)) {
+            QSet<QString> active = activeZonesOnMonitor(layoutKey, monitor);
+            bool topOccupied = active.contains(QStringLiteral("R.T"));
+            bool botOccupied = active.contains(QStringLiteral("R.B"));
+            if (topOccupied && !botOccupied)
+                targetZone = QStringLiteral("R.B");
+            else
+                targetZone = QStringLiteral("R.T");
+        }
         assignWindowToZone(win.id, win.appClass, monitor, desktop,
-                           QStringLiteral("R"), win.geometry);
+                           targetZone, win.geometry);
     } else {
         bool stepped = layout.stepVerticalRatio(true);
         if (!stepped) return;
@@ -428,17 +460,18 @@ void PaveDaemon::onMoveUp()
 {
     if (m_windowManager->isMoveInFlight()) return;
     refreshActiveWindow();
+    const WindowInfo &win = m_cachedActiveWindow;
+    if (win.id.isEmpty()) return;
+
+    QString zone = m_windowZones.value(win.id);
+    if (zone.isEmpty()) return;
+
     QString monitor = monitorUnderCursor();
     if (monitor.isEmpty()) return;
 
     int desktop = 1;
     QString layoutKey = ensureLayout(monitor, desktop);
     ZoneLayout &layout = m_layouts[layoutKey];
-    const WindowInfo &win = m_cachedActiveWindow;
-    if (win.id.isEmpty()) return;
-
-    QString zone = m_windowZones.value(win.id);
-    if (zone.isEmpty()) return;
 
     // Determine which column this window is in
     bool leftColumn = zone.startsWith(QLatin1String("L"));
@@ -473,17 +506,18 @@ void PaveDaemon::onMoveDown()
 {
     if (m_windowManager->isMoveInFlight()) return;
     refreshActiveWindow();
+    const WindowInfo &win = m_cachedActiveWindow;
+    if (win.id.isEmpty()) return;
+
+    QString zone = m_windowZones.value(win.id);
+    if (zone.isEmpty()) return;
+
     QString monitor = monitorUnderCursor();
     if (monitor.isEmpty()) return;
 
     int desktop = 1;
     QString layoutKey = ensureLayout(monitor, desktop);
     ZoneLayout &layout = m_layouts[layoutKey];
-    const WindowInfo &win = m_cachedActiveWindow;
-    if (win.id.isEmpty()) return;
-
-    QString zone = m_windowZones.value(win.id);
-    if (zone.isEmpty()) return;
 
     bool leftColumn = zone.startsWith(QLatin1String("L"));
 
@@ -526,7 +560,8 @@ void PaveDaemon::onMoveWindowLeft()
     if (monitor.isEmpty()) return;
 
     int desktop = 1;
-    QString layoutKey = ensureLayout(monitor, desktop);
+    QString layoutKey = QStringLiteral("%1:%2").arg(desktop).arg(monitor);
+    if (!m_layouts.contains(layoutKey)) return;
     const ZoneLayout &layout = m_layouts[layoutKey];
 
     if (!layout.hasVerticalSplit()) return;
@@ -564,7 +599,8 @@ void PaveDaemon::onMoveWindowRight()
     if (monitor.isEmpty()) return;
 
     int desktop = 1;
-    QString layoutKey = ensureLayout(monitor, desktop);
+    QString layoutKey = QStringLiteral("%1:%2").arg(desktop).arg(monitor);
+    if (!m_layouts.contains(layoutKey)) return;
     const ZoneLayout &layout = m_layouts[layoutKey];
 
     if (!layout.hasVerticalSplit()) return;
@@ -602,7 +638,8 @@ void PaveDaemon::onMoveWindowUp()
     if (monitor.isEmpty()) return;
 
     int desktop = 1;
-    QString layoutKey = ensureLayout(monitor, desktop);
+    QString layoutKey = QStringLiteral("%1:%2").arg(desktop).arg(monitor);
+    if (!m_layouts.contains(layoutKey)) return;
     const ZoneLayout &layout = m_layouts[layoutKey];
 
     QString currentZone = m_windowZones.value(win.id);
@@ -628,7 +665,8 @@ void PaveDaemon::onMoveWindowDown()
     if (monitor.isEmpty()) return;
 
     int desktop = 1;
-    QString layoutKey = ensureLayout(monitor, desktop);
+    QString layoutKey = QStringLiteral("%1:%2").arg(desktop).arg(monitor);
+    if (!m_layouts.contains(layoutKey)) return;
     const ZoneLayout &layout = m_layouts[layoutKey];
 
     QString currentZone = m_windowZones.value(win.id);
@@ -669,6 +707,29 @@ void PaveDaemon::onUnassignWindow()
     saveConfig();
 
     if (!monitor.isEmpty()) {
+        // Collapse h-splits if no windows remain in that column's sub-zones
+        int desktop = 1;
+        QString layoutKey = ensureLayout(monitor, desktop);
+        ZoneLayout &layout = m_layouts[layoutKey];
+        QSet<QString> active = activeZonesOnMonitor(layoutKey, monitor);
+
+        if (layout.hasHorizontalSplit(true)) {
+            bool leftOccupied = active.contains(QStringLiteral("L"))
+                             || active.contains(QStringLiteral("L.T"))
+                             || active.contains(QStringLiteral("L.B"));
+            if (!leftOccupied) {
+                layout.collapseHorizontalSplit(true);
+            }
+        }
+        if (layout.hasHorizontalSplit(false)) {
+            bool rightOccupied = active.contains(QStringLiteral("R"))
+                              || active.contains(QStringLiteral("R.T"))
+                              || active.contains(QStringLiteral("R.B"));
+            if (!rightOccupied) {
+                layout.collapseHorizontalSplit(false);
+            }
+        }
+
         applyLayout(monitor);
     }
 }
@@ -758,9 +819,102 @@ void PaveDaemon::windowActivated(const QString &data)
     );
     m_cachedActiveWindow.screen = obj.value(QLatin1String("screen")).toString();
 
+    m_lastActivationTime.start();
+
     if (m_lastMoveTime.isValid() && m_lastMoveTime.elapsed() < MOVE_SUPPRESS_MS) {
         return;
     }
+}
+
+// --- Testing / introspection ---
+
+void PaveDaemon::triggerAction(const QString &action)
+{
+    // Re-arm the activation timer so refreshActiveWindow() keeps trusting
+    // the cached window set by windowActivated(). Without this, the 500ms
+    // suppression window expires between consecutive triggerAction calls
+    // and the daemon would query KWin for the (wrong) real active window.
+    if (m_lastActivationTime.isValid()) {
+        m_lastActivationTime.start();
+    }
+
+    if (action == QLatin1String("moveLeft")) onMoveLeft();
+    else if (action == QLatin1String("moveRight")) onMoveRight();
+    else if (action == QLatin1String("moveUp")) onMoveUp();
+    else if (action == QLatin1String("moveDown")) onMoveDown();
+    else if (action == QLatin1String("almostMaximize")) onAlmostMaximize();
+    else if (action == QLatin1String("moveWindowLeft")) onMoveWindowLeft();
+    else if (action == QLatin1String("moveWindowRight")) onMoveWindowRight();
+    else if (action == QLatin1String("moveWindowUp")) onMoveWindowUp();
+    else if (action == QLatin1String("moveWindowDown")) onMoveWindowDown();
+    else if (action == QLatin1String("unassign")) onUnassignWindow();
+    else qWarning("Unknown action: %s", qPrintable(action));
+}
+
+QString PaveDaemon::getState()
+{
+    QJsonObject state;
+
+    // Layouts
+    QJsonObject layouts;
+    for (auto it = m_layouts.constBegin(); it != m_layouts.constEnd(); ++it) {
+        const ZoneLayout &l = it.value();
+        QJsonObject lo;
+        lo.insert(QStringLiteral("hasVerticalSplit"), l.hasVerticalSplit());
+        lo.insert(QStringLiteral("verticalRatio"), l.verticalRatio());
+        lo.insert(QStringLiteral("hasLeftHSplit"), l.hasHorizontalSplit(true));
+        lo.insert(QStringLiteral("leftHRatio"), l.horizontalRatio(true));
+        lo.insert(QStringLiteral("hasRightHSplit"), l.hasHorizontalSplit(false));
+        lo.insert(QStringLiteral("rightHRatio"), l.horizontalRatio(false));
+        layouts.insert(it.key(), lo);
+    }
+    state.insert(QStringLiteral("layouts"), layouts);
+
+    // Window zones
+    QJsonObject zones;
+    for (auto it = m_windowZones.constBegin(); it != m_windowZones.constEnd(); ++it) {
+        zones.insert(it.key(), it.value());
+    }
+    state.insert(QStringLiteral("windowZones"), zones);
+
+    // Window monitors
+    QJsonObject monitors;
+    for (auto it = m_windowMonitors.constBegin(); it != m_windowMonitors.constEnd(); ++it) {
+        monitors.insert(it.key(), it.value());
+    }
+    state.insert(QStringLiteral("windowMonitors"), monitors);
+
+    // Max state
+    QJsonObject maxStates;
+    for (auto it = m_maxState.constBegin(); it != m_maxState.constEnd(); ++it) {
+        QString s = it.value() == MaxState::Almost ? QStringLiteral("almost")
+                  : it.value() == MaxState::Full   ? QStringLiteral("full")
+                  : QStringLiteral("none");
+        maxStates.insert(it.key(), s);
+    }
+    state.insert(QStringLiteral("maxState"), maxStates);
+
+    // Active window
+    QJsonObject active;
+    active.insert(QStringLiteral("id"), m_cachedActiveWindow.id);
+    active.insert(QStringLiteral("appClass"), m_cachedActiveWindow.appClass);
+    active.insert(QStringLiteral("screen"), m_cachedActiveWindow.screen);
+    state.insert(QStringLiteral("activeWindow"), active);
+
+    return QString::fromUtf8(QJsonDocument(state).toJson(QJsonDocument::Compact));
+}
+
+void PaveDaemon::resetState()
+{
+    m_layouts.clear();
+    m_assignments.clear();
+    m_preSnapGeometry.clear();
+    m_windowZones.clear();
+    m_windowMonitors.clear();
+    m_maxState.clear();
+    m_zoneStacks.clear();
+    m_cachedActiveWindow = WindowInfo{};
+    qInfo("State reset (all layouts, assignments, and window tracking cleared)");
 }
 
 void PaveDaemon::windowClosed(const QString &windowId)

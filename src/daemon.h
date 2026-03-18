@@ -28,6 +28,11 @@ public Q_SLOTS:
     void windowActivated(const QString &data);
     void windowClosed(const QString &windowId);
 
+    // Testing / introspection
+    void triggerAction(const QString &action);
+    QString getState();
+    void resetState();
+
 private:
     void setupShortcuts();
     void loadConfig();
@@ -117,5 +122,11 @@ private:
     /// our call returns, so a bool flag can't suppress them.
     QElapsedTimer m_lastMoveTime;
     static constexpr int MOVE_SUPPRESS_MS = 200;
+
+    /// Timer to suppress refreshActiveWindow when windowActivated was called recently.
+    /// This lets D-Bus-injected window activations (from tests or KWin events) take
+    /// precedence over the KWin query in refreshActiveWindow().
+    QElapsedTimer m_lastActivationTime;
+    static constexpr int ACTIVATION_SUPPRESS_MS = 500;
 
 };

@@ -8,5 +8,12 @@
     <method name="windowClosed">
       <arg name="windowId" type="s" direction="in"/>
     </method>
+    <method name="triggerAction">
+      <arg name="action" type="s" direction="in"/>
+    </method>
+    <method name="getState">
+      <arg name="result" type="s" direction="out"/>
+    </method>
+    <method name="resetState"/>
   </interface>
 </node>
