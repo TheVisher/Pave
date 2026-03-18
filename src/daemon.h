@@ -9,6 +9,24 @@
 #include "zonelayout.h"
 
 class QAction;
+class PaveDaemon;
+
+/// Receives window events from the persistent KWin helper script.
+/// Registered at /Daemon/Events on the session bus.
+class EventReceiver : public QObject
+{
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "org.kde.pave.Events")
+
+public:
+    explicit EventReceiver(PaveDaemon *daemon, QObject *parent = nullptr);
+
+public Q_SLOTS:
+    void windowEvent(const QString &data);
+
+private:
+    PaveDaemon *m_daemon;
+};
 
 /// Core Pave daemon. Owns the zone layouts, window assignments, and shortcuts.
 class PaveDaemon : public QObject

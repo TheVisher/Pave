@@ -42,6 +42,11 @@ qt6_add_dbus_adaptor(PAVE_DBUS_SRCS
     src/windowmanager.h ScriptResultReceiver
     scriptresultadaptor ScriptResultAdaptor)
 
+qt6_add_dbus_adaptor(PAVE_DBUS_SRCS
+    data/org.kde.pave.Events.xml
+    src/daemon.h EventReceiver
+    eventreceiveradaptor EventReceiverAdaptor)
+
 add_executable(pave
     src/main.cpp
     src/daemon.cpp

@@ -80,16 +80,19 @@ function getWindows() {
 // --- Event forwarding ---
 
 // Forward window activation to the daemon via D-Bus
+// NOTE: Using /Daemon/ScriptResult path as a TEST — the /Daemon path
+// doesn't work for unknown reasons. This uses the same callDBus path
+// that temp scripts use successfully.
 workspace.windowActivated.connect(function(w) {
     if (!w || !w.normalWindow) return;
     if (w.fullScreen) return;
 
     callDBus(
         "org.kde.pave",
-        "/Daemon",
-        "org.kde.pave.Daemon",
-        "windowActivated",
-        JSON.stringify({
+        "/Daemon/Events",
+        "org.kde.pave.Events",
+        "windowEvent",
+        "ACTIVATE:" + JSON.stringify({
             id: w.internalId.toString(),
             appClass: w.resourceClass.toString(),
             x: w.frameGeometry.x,
@@ -106,9 +109,9 @@ workspace.windowRemoved.connect(function(w) {
     if (!w) return;
     callDBus(
         "org.kde.pave",
-        "/Daemon",
-        "org.kde.pave.Daemon",
-        "windowClosed",
-        w.internalId.toString()
+        "/Daemon/Events",
+        "org.kde.pave.Events",
+        "windowEvent",
+        "CLOSE:" + w.internalId.toString()
     );
 });

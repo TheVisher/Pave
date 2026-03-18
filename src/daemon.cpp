@@ -1,5 +1,6 @@
 #include "daemon.h"
 #include "daemonadaptor.h"
+#include "eventreceiveradaptor.h"
 
 #include <QAction>
 #include <QCursor>
@@ -12,12 +13,36 @@
 #include <QDBusMessage>
 #include <QDBusReply>
 
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 
 #include <KGlobalAccel>
 #include <KConfig>
 #include <KConfigGroup>
+
+// --- EventReceiver ---
+
+EventReceiver::EventReceiver(PaveDaemon *daemon, QObject *parent)
+    : QObject(parent)
+    , m_daemon(daemon)
+{
+}
+
+void EventReceiver::windowEvent(const QString &data)
+{
+    if (data.startsWith(QLatin1String("ACTIVATE:"))) {
+        QString json = data.mid(9);
+        m_daemon->windowActivated(json);
+    } else if (data.startsWith(QLatin1String("CLOSE:"))) {
+        QString windowId = data.mid(6);
+        m_daemon->windowClosed(windowId);
+    } else {
+        qWarning("EventReceiver: unknown event: %s", qPrintable(data.left(30)));
+    }
+}
+
+// --- PaveDaemon ---
 
 PaveDaemon::PaveDaemon(QObject *parent)
     : QObject(parent)
@@ -35,6 +60,14 @@ bool PaveDaemon::init()
     auto bus = QDBusConnection::sessionBus();
     if (!bus.registerObject(QStringLiteral("/Daemon"), this)) {
         qWarning("Failed to register PaveDaemon on D-Bus at /Daemon");
+        return false;
+    }
+
+    // Register event receiver for KWin helper script callbacks
+    auto *eventReceiver = new EventReceiver(this, this);
+    new EventReceiverAdaptor(eventReceiver);
+    if (!bus.registerObject(QStringLiteral("/Daemon/Events"), eventReceiver)) {
+        qWarning("Failed to register EventReceiver on D-Bus at /Daemon/Events");
         return false;
     }
 
@@ -893,6 +926,39 @@ QString PaveDaemon::getState()
         maxStates.insert(it.key(), s);
     }
     state.insert(QStringLiteral("maxState"), maxStates);
+
+    // Assignments
+    QJsonObject assignments;
+    for (auto it = m_assignments.constBegin(); it != m_assignments.constEnd(); ++it) {
+        QJsonObject a;
+        a.insert(QStringLiteral("desktop"), it.value().desktop);
+        a.insert(QStringLiteral("monitor"), it.value().monitor);
+        a.insert(QStringLiteral("zoneId"), it.value().zoneId);
+        assignments.insert(it.key(), a);
+    }
+    state.insert(QStringLiteral("assignments"), assignments);
+
+    // Pre-snap geometry
+    QJsonObject preSnap;
+    for (auto it = m_preSnapGeometry.constBegin(); it != m_preSnapGeometry.constEnd(); ++it) {
+        preSnap.insert(it.key(), QStringLiteral("%1,%2,%3,%4")
+            .arg(it.value().x()).arg(it.value().y())
+            .arg(it.value().width()).arg(it.value().height()));
+    }
+    state.insert(QStringLiteral("preSnapGeometry"), preSnap);
+
+    // Zone stacks
+    QJsonObject stacks;
+    for (auto it = m_zoneStacks.constBegin(); it != m_zoneStacks.constEnd(); ++it) {
+        if (!it.value().isEmpty()) {
+            QJsonArray arr;
+            for (const QString &wid : it.value()) {
+                arr.append(wid);
+            }
+            stacks.insert(it.key(), arr);
+        }
+    }
+    state.insert(QStringLiteral("zoneStacks"), stacks);
 
     // Active window
     QJsonObject active;
