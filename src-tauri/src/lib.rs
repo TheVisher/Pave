@@ -3,6 +3,7 @@ mod platform;
 mod presets;
 mod tiling;
 mod tray;
+mod zone_assignments;
 mod zone_layout;
 
 use config::{PaveConfig, Preset};
@@ -177,7 +178,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 // Retry KWin backend init with backoff — on login, KWin's D-Bus
                 // may not be ready yet when Pave autostarts.
-                let (backend, mut shortcut_rx, mut resize_rx, mut preset_rx, mut window_event_rx) = {
+                let (backend, mut shortcut_rx, mut resize_rx, mut preset_rx, mut window_event_rx, mut window_added_rx) = {
                     let mut attempt = 0u32;
                     loop {
                         match KWinBackend::new().await {
@@ -528,6 +529,22 @@ pub fn run() {
                                 }
                                 // Also clean last_action for the closed window
                                 tiling_state_arc.clear_last_action(&window_id);
+                            }
+                        }
+                        // Window opened: auto-place into zone
+                        result = window_added_rx.recv() => {
+                            if let Ok(payload) = result {
+                                let cfg = config_arc.read().await.clone();
+                                if cfg.auto_place {
+                                    if let Err(e) = tiling::handle_auto_place(
+                                        backend_arc.as_ref(),
+                                        &cfg,
+                                        &tiling_state_arc,
+                                        &payload,
+                                    ).await {
+                                        log::error!("Auto-place failed: {e}");
+                                    }
+                                }
                             }
                         }
                         // Session Ghost: capture session on shutdown

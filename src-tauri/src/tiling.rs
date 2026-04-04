@@ -1,6 +1,7 @@
 use crate::config::PaveConfig;
 use crate::platform::kwin::KWinBackend;
 use crate::platform::{MonitorInfo, WindowInfo};
+use crate::zone_assignments::ZoneAssignments;
 use crate::zone_layout::{AdjacentDirection, ZoneLayout, ZoneLeafId};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -324,6 +325,8 @@ pub struct TilingState {
     zone_layouts: Mutex<HashMap<String, ZoneLayout>>,
     /// Saved layout before maximize (for tile restore).
     pre_maximize_layout: Mutex<HashMap<String, ZoneLayout>>,
+    /// Persistent window class → zone assignments for auto-placement.
+    zone_assignments: Mutex<ZoneAssignments>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -385,6 +388,7 @@ impl TilingState {
             zone_last_geometry: Mutex::new(HashMap::new()),
             zone_layouts: Mutex::new(HashMap::new()),
             pre_maximize_layout: Mutex::new(HashMap::new()),
+            zone_assignments: Mutex::new(ZoneAssignments::load()),
         }
     }
 
@@ -401,6 +405,20 @@ impl TilingState {
     fn take_pre_maximize_layout(&self, monitor_name: &str) -> Option<ZoneLayout> {
         let mut saved = self.pre_maximize_layout.lock().unwrap();
         saved.remove(monitor_name)
+    }
+
+    /// Record that a window class was tiled into a zone.
+    pub fn record_zone_assignment(&self, resource_class: &str, action: &str) {
+        if let Some(leaf_id) = ZoneLeafId::from_action(action) {
+            let mut assignments = self.zone_assignments.lock().unwrap();
+            assignments.set(resource_class, &leaf_id);
+        }
+    }
+
+    /// Look up the remembered zone for a window class.
+    pub fn get_zone_assignment(&self, resource_class: &str) -> Option<ZoneLeafId> {
+        let assignments = self.zone_assignments.lock().unwrap();
+        assignments.get(resource_class)
     }
 
     /// Get the zone layout for a monitor, creating a default 50/50 two-column if missing.
@@ -1043,7 +1061,30 @@ pub async fn surface_zone_entry(
         if let Some(monitor) = monitors.get(mon_idx) {
             let layout = state.get_or_create_layout(&monitor.name);
             let rects = layout.compute_rects(monitor, gap);
-            rects.get(&leaf_id).copied()
+            if let Some(rect) = rects.get(&leaf_id) {
+                Some(*rect)
+            } else {
+                // Zone has been split — compute bounding rect of descendant leaves
+                let children: Vec<&Rect> = rects.iter()
+                    .filter(|(k, _)| leaf_id.is_ancestor_of(k))
+                    .map(|(_, v)| v)
+                    .collect();
+                if !children.is_empty() {
+                    let mut x_min = i32::MAX;
+                    let mut y_min = i32::MAX;
+                    let mut x_max = i32::MIN;
+                    let mut y_max = i32::MIN;
+                    for r in &children {
+                        x_min = x_min.min(r.x);
+                        y_min = y_min.min(r.y);
+                        x_max = x_max.max(r.x + r.width);
+                        y_max = y_max.max(r.y + r.height);
+                    }
+                    Some(Rect { x: x_min, y: y_min, width: x_max - x_min, height: y_max - y_min })
+                } else {
+                    None
+                }
+            }
         } else {
             None
         }
@@ -1181,6 +1222,30 @@ fn compute_zone_rect_for_entry(
         let rects = layout.compute_rects(monitor, gap);
         if let Some(rect) = rects.get(&leaf_id) {
             return Some(*rect);
+        }
+        // If the zone has been split (e.g. "R" split to "R.T"/"R.B"),
+        // compute the bounding rect of all descendant leaves.
+        let children: Vec<&Rect> = rects.iter()
+            .filter(|(k, _)| leaf_id.is_ancestor_of(k))
+            .map(|(_, v)| v)
+            .collect();
+        if !children.is_empty() {
+            let mut x_min = i32::MAX;
+            let mut y_min = i32::MAX;
+            let mut x_max = i32::MIN;
+            let mut y_max = i32::MIN;
+            for r in &children {
+                x_min = x_min.min(r.x);
+                y_min = y_min.min(r.y);
+                x_max = x_max.max(r.x + r.width);
+                y_max = y_max.max(r.y + r.height);
+            }
+            return Some(Rect {
+                x: x_min,
+                y: y_min,
+                width: x_max - x_min,
+                height: y_max - y_min,
+            });
         }
     }
 
@@ -1331,6 +1396,7 @@ pub async fn handle_maximize(
         wm.move_window(&window.id, almost_rect.x, almost_rect.y, almost_rect.width, almost_rect.height)
             .await?;
         state.set_last_action(&window.id, "almost_maximize", mon_idx);
+        state.record_zone_assignment(&window.resource_class, "almost_maximize");
         auto_tab_after_snap(wm, config, state, &window.id, "almost_maximize", mon_idx, almost_rect).await?;
     }
 
@@ -1447,6 +1513,7 @@ pub async fn handle_snap(
         )
         .await?;
         state.set_last_action(&window.id, &action, mon_idx);
+        state.record_zone_assignment(&window.resource_class, &action);
         auto_tab_after_snap(wm, config, state, &window.id, &action, mon_idx, final_rect)
             .await?;
         cooperative_resize_from_layout(wm, state, &window.id, monitor, mon_idx, gap).await?;
@@ -1468,6 +1535,7 @@ pub async fn handle_snap(
         wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height)
             .await?;
         state.set_last_action(&window.id, &action, mon_idx);
+        state.record_zone_assignment(&window.resource_class, &action);
         auto_tab_after_snap(wm, config, state, &window.id, &action, mon_idx, rect).await?;
         cooperative_resize_from_layout(wm, state, &window.id, monitor, mon_idx, gap).await?;
         return Ok(());
@@ -1501,6 +1569,7 @@ pub async fn handle_snap(
         wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height)
             .await?;
         state.set_last_action(&window.id, &action, mon_idx);
+        state.record_zone_assignment(&window.resource_class, &action);
         auto_tab_after_snap(wm, config, state, &window.id, &action, mon_idx, rect).await?;
         cooperative_resize_from_layout(wm, state, &window.id, monitor, mon_idx, gap).await?;
     } else if growing && !is_quarter {
@@ -1517,6 +1586,7 @@ pub async fn handle_snap(
         )
         .await?;
         state.set_last_action(&window.id, "almost_maximize", mon_idx);
+        state.record_zone_assignment(&window.resource_class, "almost_maximize");
         auto_tab_after_snap(
             wm,
             config,
@@ -1588,6 +1658,7 @@ pub async fn handle_snap(
             wm.move_window(&window.id, rect.x, rect.y, rect.width, rect.height)
                 .await?;
             state.set_last_action(&window.id, &action, next_mon_idx);
+            state.record_zone_assignment(&window.resource_class, &action);
             auto_tab_after_snap(wm, config, state, &window.id, &action, next_mon_idx, rect)
                 .await?;
         }
@@ -1700,6 +1771,7 @@ pub async fn handle_snap_vertical(
             };
             wm.move_window(&window.id, target_rect.x, target_rect.y, target_rect.width, target_rect.height).await?;
             state.set_last_action(&window.id, target_action, next_mon_idx);
+            state.record_zone_assignment(&window.resource_class, target_action);
             auto_tab_after_snap(wm, config, state, &window.id, target_action, next_mon_idx, target_rect).await?;
             return Ok(());
         }
@@ -1745,6 +1817,7 @@ pub async fn handle_snap_vertical(
 
         wm.move_window(&window.id, target_rect.x, target_rect.y, target_rect.width, target_rect.height).await?;
         state.set_last_action(&window.id, &target_action, mon_idx);
+        state.record_zone_assignment(&window.resource_class, &target_action);
         auto_tab_after_snap(wm, config, state, &window.id, &target_action, mon_idx, target_rect).await?;
         return Ok(());
     }
@@ -1790,6 +1863,7 @@ pub async fn handle_snap_vertical(
     .await?;
 
     state.set_last_action(&window.id, target_action, mon_idx);
+    state.record_zone_assignment(&window.resource_class, target_action);
     auto_tab_after_snap(wm, config, state, &window.id, target_action, mon_idx, target_rect).await?;
     Ok(())
 }
@@ -2745,6 +2819,7 @@ pub async fn handle_zone_snap(
         )
         .await?;
         state.set_last_action(&window.id, &target_action, mon_idx);
+        state.record_zone_assignment(&window.resource_class, &target_action);
 
         log::info!(
             "Zone snap: moved '{}' from {} to empty zone {} ({},{} {}x{})",
@@ -2784,6 +2859,7 @@ pub async fn handle_zone_snap(
         )
         .await?;
         state.set_last_action(&window.id, &target_action, mon_idx);
+        state.record_zone_assignment(&window.resource_class, &target_action);
 
         log::info!(
             "Zone snap: moved '{}' from {} onto {} (displaced {} into stack)",
@@ -2813,4 +2889,149 @@ pub async fn handle_zone_snap(
     reconcile_layout(state, &monitor.name, mon_idx);
 
     Ok(())
+}
+
+/// Payload from KWin's windowAdded D-Bus event.
+#[derive(Debug, Deserialize)]
+struct WindowAddedEvent {
+    id: String,
+    resource_class: String,
+}
+
+/// Handle a newly opened window: auto-place it into a remembered or largest zone.
+pub async fn handle_auto_place(
+    wm: &KWinBackend,
+    config: &PaveConfig,
+    state: &TilingState,
+    payload: &str,
+) -> Result<(), String> {
+    let event: WindowAddedEvent =
+        serde_json::from_str(payload).map_err(|e| format!("Failed to parse window added event: {e}"))?;
+
+    if event.resource_class.is_empty() {
+        return Ok(());
+    }
+
+    // Skip apps that should never be auto-placed (screenshot tools, system overlays, etc.)
+    let skip_classes = [
+        "org.kde.spectacle", "spectacle", "flameshot", "gnome-screenshot",
+        "xdg-desktop-portal", "org.kde.polkit-kde-authentication-agent-1",
+        "plasmashell", "krunner", "org.kde.krunner",
+    ];
+    let class_lower = event.resource_class.to_lowercase();
+    if skip_classes.iter().any(|s| class_lower == *s) {
+        return Ok(());
+    }
+
+    // Brief delay to let KWin settle the window geometry
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let windows = wm.get_windows().await?;
+    let window = match windows.iter().find(|w| w.id == event.id) {
+        Some(w) => w,
+        None => return Ok(()), // Window already closed
+    };
+
+    // Skip if already maximized or minimized
+    if window.maximized || window.minimized {
+        return Ok(());
+    }
+
+    let monitors = wm.get_monitors().await?;
+    if monitors.is_empty() {
+        return Err("No monitors found".to_string());
+    }
+
+    let mon_idx = find_window_monitor(window, &monitors);
+    let monitor = &monitors[mon_idx];
+
+    // Skip excluded monitors
+    if config.excluded_monitors.iter().any(|m| m == &monitor.name) {
+        return Ok(());
+    }
+
+    let gap = config.gap_size;
+
+    // Look up remembered zone or find the largest available
+    let (target_leaf, target_rect) = if let Some(leaf_id) = state.get_zone_assignment(&event.resource_class) {
+        // Check if the remembered zone exists in the current layout
+        let layout = state.get_or_create_layout(&monitor.name);
+        let rects = layout.compute_rects(monitor, gap);
+        if let Some(rect) = rects.get(&leaf_id) {
+            (leaf_id, *rect)
+        } else {
+            // Remembered zone no longer exists — fall back to largest
+            match find_largest_available_zone(state, &monitor.name, monitor, mon_idx, gap) {
+                Some((leaf, rect)) => (leaf, rect),
+                None => return Ok(()),
+            }
+        }
+    } else {
+        match find_largest_available_zone(state, &monitor.name, monitor, mon_idx, gap) {
+            Some((leaf, rect)) => (leaf, rect),
+            None => return Ok(()),
+        }
+    };
+
+    let action = target_leaf.to_action();
+    log::info!(
+        "Auto-place: '{}' ({}) -> zone {} ({},{} {}x{})",
+        event.resource_class, event.id, target_leaf, target_rect.x, target_rect.y, target_rect.width, target_rect.height
+    );
+
+    wm.move_window(&event.id, target_rect.x, target_rect.y, target_rect.width, target_rect.height)
+        .await?;
+    state.set_last_action(&event.id, &action, mon_idx);
+    auto_tab_after_snap(wm, config, state, &event.id, &action, mon_idx, target_rect).await?;
+
+    Ok(())
+}
+
+/// Find the largest available zone on a monitor, preferring unoccupied zones.
+fn find_largest_available_zone(
+    state: &TilingState,
+    monitor_name: &str,
+    monitor: &MonitorInfo,
+    monitor_idx: usize,
+    gap: u32,
+) -> Option<(ZoneLeafId, Rect)> {
+    let layout = state.get_or_create_layout(monitor_name);
+    let rects = layout.compute_rects(monitor, gap);
+
+    if rects.is_empty() {
+        return None;
+    }
+
+    // Get occupied zone IDs for this monitor
+    let occupied: Vec<ZoneLeafId> = {
+        let tracker = state.zone_tracker.lock().unwrap();
+        tracker.zones.iter()
+            .filter(|(zone_id, entries)| zone_id.monitor_idx == monitor_idx && !entries.is_empty())
+            .map(|(zone_id, _)| zone_id.leaf_id.clone())
+            .collect()
+    };
+
+    // Try unoccupied zones first, sorted by area (largest first)
+    let mut unoccupied: Vec<_> = rects.iter()
+        .filter(|(leaf_id, _)| !occupied.contains(*leaf_id))
+        .collect();
+    unoccupied.sort_by(|(_, a), (_, b)| {
+        let area_a = a.width as i64 * a.height as i64;
+        let area_b = b.width as i64 * b.height as i64;
+        area_b.cmp(&area_a)
+    });
+
+    if let Some((leaf_id, rect)) = unoccupied.first() {
+        return Some(((*leaf_id).clone(), **rect));
+    }
+
+    // All zones occupied — pick the largest overall
+    let mut all: Vec<_> = rects.iter().collect();
+    all.sort_by(|(_, a), (_, b)| {
+        let area_a = a.width as i64 * a.height as i64;
+        let area_b = b.width as i64 * b.height as i64;
+        area_b.cmp(&area_a)
+    });
+
+    all.first().map(|(leaf_id, rect)| ((*leaf_id).clone(), **rect))
 }

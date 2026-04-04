@@ -56,14 +56,20 @@ impl PaveResizeReceiver {
 
 /// D-Bus object that receives window lifecycle events from KWin scripts
 struct PaveWindowEventReceiver {
-    sender: broadcast::Sender<String>,
+    removed_sender: broadcast::Sender<String>,
+    added_sender: broadcast::Sender<String>,
 }
 
 #[interface(name = "com.pave.WindowEvents")]
 impl PaveWindowEventReceiver {
     async fn window_removed(&self, window_id: &str) {
         log::info!("Window removed: {window_id}");
-        let _ = self.sender.send(window_id.to_string());
+        let _ = self.removed_sender.send(window_id.to_string());
+    }
+
+    async fn window_added(&self, payload: &str) {
+        log::info!("Window added: {payload}");
+        let _ = self.added_sender.send(payload.to_string());
     }
 }
 
@@ -106,6 +112,7 @@ impl KWinBackend {
             broadcast::Receiver<String>,
             broadcast::Receiver<String>,
             broadcast::Receiver<String>,
+            broadcast::Receiver<String>,
         ),
         String,
     > {
@@ -119,7 +126,8 @@ impl KWinBackend {
         let (shortcut_tx, shortcut_rx) = broadcast::channel(16);
         let (resize_tx, resize_rx) = broadcast::channel(16);
         let (preset_tx, preset_rx) = broadcast::channel(16);
-        let (window_event_tx, window_event_rx) = broadcast::channel(16);
+        let (window_removed_tx, window_event_rx) = broadcast::channel(16);
+        let (window_added_tx, window_added_rx) = broadcast::channel(16);
 
         // Register D-Bus objects for script data callbacks, shortcut presses, resize events, and window lifecycle
         let script_receiver = PaveScriptReceiver {
@@ -135,7 +143,8 @@ impl KWinBackend {
             sender: preset_tx,
         };
         let window_event_receiver = PaveWindowEventReceiver {
-            sender: window_event_tx,
+            removed_sender: window_removed_tx,
+            added_sender: window_added_tx,
         };
 
         connection
@@ -183,6 +192,7 @@ impl KWinBackend {
             resize_rx,
             preset_rx,
             window_event_rx,
+            window_added_rx,
         ))
     }
 

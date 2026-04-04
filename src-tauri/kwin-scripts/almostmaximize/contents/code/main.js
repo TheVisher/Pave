@@ -195,9 +195,16 @@ for (var i = 0; i < clients.length; i++) {
     connectResizeSignals(clients[i]);
 }
 
-// Connect to newly added windows
+// Connect to newly added windows and notify Pave for auto-placement
 workspace.windowAdded.connect(function(client) {
     connectResizeSignals(client);
+    if (!client || !client.normalWindow) return;
+    callDBus("com.pave.app", "/com/pave/WindowEvents",
+             "com.pave.WindowEvents", "WindowAdded",
+             JSON.stringify({
+                 id: client.internalId.toString(),
+                 resource_class: client.resourceClass || ""
+             }));
 });
 
 // Notify Pave when a window is removed (closed)

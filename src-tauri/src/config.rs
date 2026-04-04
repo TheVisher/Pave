@@ -35,6 +35,8 @@ pub struct PaveConfig {
     pub restore_session: bool,
     #[serde(default = "default_true")]
     pub auto_surface_tabs: bool,
+    #[serde(default = "default_true")]
+    pub auto_place: bool,
 }
 
 fn default_true() -> bool {
@@ -55,6 +57,7 @@ impl Default for PaveConfig {
             presets: Vec::new(),
             restore_session: false,
             auto_surface_tabs: true,
+            auto_place: true,
         }
     }
 }
