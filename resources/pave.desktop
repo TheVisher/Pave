@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Pave
+Comment=Padded Rectangle-style window snapping for KDE
+Exec=pave-settings
+Icon=pave
+Terminal=false
+Categories=Settings;
+StartupNotify=true

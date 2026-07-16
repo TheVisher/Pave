@@ -33,36 +33,58 @@ synchronized paired resizing.
   during the drag and is reconciled once more when the drag ends.
 - Default padding is `10 px`.
 
-## Installed Files
+## Installation
 
-The KWin script source lives in this project:
+An Arch `PKGBUILD` is included for local installation:
 
-```text
-~/Projects/pave/kwin/metadata.json
-~/Projects/pave/kwin/contents/code/main.js
+```bash
+cd packaging/arch
+makepkg -si
 ```
 
-The settings launcher copies that source into KDE's script directory:
+The package installs the settings command, application entry, icon, and KWin
+source under `/usr`. Open `Pave` from the application launcher, enable
+autostart if desired, and select `Apply` to install the KWin script for the
+current user.
+
+For development, run the settings app directly from a checkout:
+
+```bash
+python3 pave-settings.py
+```
+
+The app automatically uses the adjacent `kwin/` and `resources/` directories
+when run from source, or `/usr/share/pave` when installed as a package.
+
+## Installed Files
+
+The Arch package installs:
+
+```text
+/usr/bin/pave-settings
+/usr/share/pave/kwin/metadata.json
+/usr/share/pave/kwin/contents/code/main.js
+/usr/share/pave/pave-autostart.desktop
+/usr/share/applications/pave.desktop
+/usr/share/icons/hicolor/scalable/apps/pave.svg
+```
+
+Applying settings copies the packaged or checkout script into KDE's per-user
+script directory:
 
 ```text
 ~/.local/share/kwin/scripts/pave/metadata.json
 ~/.local/share/kwin/scripts/pave/contents/code/main.js
 ```
 
-The settings app lives here:
+Enabling autostart creates:
 
 ```text
-~/Projects/pave/pave-settings.py
-~/.local/bin/pave-settings
-~/.local/share/applications/pave.desktop
-~/.local/share/applications/pave-autostart.desktop
 ~/.config/autostart/pave.desktop
 ```
 
-`~/.local/bin/pave-settings` is just a launcher for the Python settings app.
-The desktop entry makes Pave appear in the KDE launcher. The autostart entry
-runs `pave-settings --apply` so login silently enables the script and refreshes
-shortcuts without opening the settings window.
+The autostart entry runs `pave-settings --apply` so login silently enables the
+script and refreshes shortcuts without opening the settings window.
 
 ## Settings App
 

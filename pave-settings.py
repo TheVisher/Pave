@@ -24,15 +24,23 @@ from PySide6.QtWidgets import (
 
 
 HOME = Path.home()
-PROJECT_DIR = HOME / "Projects" / "pave"
+SOURCE_DIR = Path(__file__).resolve().parent
+PACKAGED_DATA_DIR = Path("/usr/share/pave")
+SOURCE_RESOURCE_DIR = SOURCE_DIR / "resources"
+RESOURCE_DIR = (
+    SOURCE_RESOURCE_DIR if SOURCE_RESOURCE_DIR.is_dir() else PACKAGED_DATA_DIR
+)
 KWINRC = HOME / ".config" / "kwinrc"
 SHORTCUTSRC = HOME / ".config" / "kglobalshortcutsrc"
 SCRIPT_DIR = HOME / ".local" / "share" / "kwin" / "scripts" / "pave"
-SCRIPT_SOURCE_DIR = PROJECT_DIR / "kwin"
+SCRIPT_SOURCE_DIR = (
+    SOURCE_DIR / "kwin"
+    if (SOURCE_DIR / "kwin").is_dir()
+    else PACKAGED_DATA_DIR / "kwin"
+)
 AUTOSTART_FILE = HOME / ".config" / "autostart" / "pave.desktop"
-DESKTOP_FILE = HOME / ".local" / "share" / "applications" / "pave.desktop"
-AUTOSTART_DESKTOP_FILE = HOME / ".local" / "share" / "applications" / "pave-autostart.desktop"
-ICON_FILE = HOME / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / "pave.svg"
+AUTOSTART_DESKTOP_FILE = RESOURCE_DIR / "pave-autostart.desktop"
+ICON_FILE = RESOURCE_DIR / "pave.svg"
 
 
 def run(command, check=False):
