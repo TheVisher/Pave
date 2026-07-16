@@ -1,9 +1,9 @@
 {
     "KPlugin": {
-        "Id": "almostmaximize",
-        "Name": "Almost Maximize",
-        "Description": "Resize window to fill the screen with a 15px gap on all sides",
-        "Version": "1.0",
+        "Id": "pave",
+        "Name": "Pave",
+        "Description": "Predictable padded window snapping for KDE",
+        "Version": "0.6.1",
         "Authors": [
             {
                 "Name": "eaholum"
