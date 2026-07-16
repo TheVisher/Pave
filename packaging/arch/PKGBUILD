@@ -1,0 +1,46 @@
+# Maintainer: eaholum
+pkgname=pave-git
+pkgver=0.6.1.r0.g0000000
+pkgrel=1
+pkgdesc="Lightweight padded window snapping for KDE Plasma"
+arch=('any')
+url="https://github.com/TheVisher/Pave"
+license=('MIT')
+depends=(
+    'kconfig'
+    'kwin'
+    'pyside6'
+    'python'
+    'qt6-tools'
+    'systemd'
+)
+makedepends=('git')
+provides=('pave')
+conflicts=('pave')
+source=("${pkgname}::git+${url}.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$pkgname"
+    printf "0.6.1.r%s.g%s" \
+        "$(git rev-list --count HEAD)" \
+        "$(git rev-parse --short=7 HEAD)"
+}
+
+package() {
+    cd "$pkgname"
+
+    install -Dm755 pave-settings.py "$pkgdir/usr/bin/pave-settings"
+    install -Dm644 kwin/metadata.json \
+        "$pkgdir/usr/share/pave/kwin/metadata.json"
+    install -Dm644 kwin/contents/code/main.js \
+        "$pkgdir/usr/share/pave/kwin/contents/code/main.js"
+    install -Dm644 resources/pave-autostart.desktop \
+        "$pkgdir/usr/share/pave/pave-autostart.desktop"
+    install -Dm644 resources/pave.desktop \
+        "$pkgdir/usr/share/applications/pave.desktop"
+    install -Dm644 resources/pave.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/pave.svg"
+    install -Dm644 LICENSE \
+        "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

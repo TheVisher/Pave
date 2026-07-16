@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Pave
+Comment=Enable Pave window snapping for KDE
+Exec=pave-settings --apply
+Icon=pave
+Terminal=false
+Categories=Settings;
+NoDisplay=true
+X-KDE-autostart-after=panel
